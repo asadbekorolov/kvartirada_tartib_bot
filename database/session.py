@@ -49,6 +49,10 @@ async def init_db() -> None:
                 sync_conn.exec_driver_sql("ALTER TABLE users ADD COLUMN telegram_id BIGINT")
             except Exception:
                 pass
+            try:
+                sync_conn.exec_driver_sql("ALTER TABLE rotation_state ADD COLUMN group_chat_id BIGINT")
+            except Exception:
+                pass
 
         await conn.run_sync(migrate_schema)
 

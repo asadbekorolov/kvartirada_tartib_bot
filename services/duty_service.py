@@ -81,10 +81,29 @@ async def get_or_create_rotation_state(session: AsyncSession) -> RotationState:
         state = RotationState(
             anchor_date=settings.parsed_base_date,
             anchor_slot=0,
+            group_chat_id=settings.GROUP_CHAT_ID,
         )
         session.add(state)
         await session.commit()
     return state
+
+
+async def get_active_group_chat_id(session: AsyncSession) -> Optional[int]:
+    """Retrieve active group chat id from DB or fallback to settings."""
+    rot_state = await get_or_create_rotation_state(session)
+    if rot_state.group_chat_id:
+        settings.GROUP_CHAT_ID = rot_state.group_chat_id
+        return rot_state.group_chat_id
+    return settings.GROUP_CHAT_ID
+
+
+async def set_active_group_chat_id(session: AsyncSession, group_id: int) -> None:
+    """Save active group chat id to DB and settings."""
+    settings.GROUP_CHAT_ID = group_id
+    rot_state = await get_or_create_rotation_state(session)
+    rot_state.group_chat_id = group_id
+    session.add(rot_state)
+    await session.commit()
 
 
 def calculate_rotation_index(

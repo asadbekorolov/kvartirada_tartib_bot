@@ -6,6 +6,7 @@ from handlers.expense import router as expense_router
 from handlers.guest import router as guest_router
 from handlers.fund import router as fund_router
 from handlers.rules import router as rules_router
+from handlers.group import router as group_router
 
 __all__ = [
     "start_router",
@@ -16,4 +17,5 @@ __all__ = [
     "guest_router",
     "fund_router",
     "rules_router",
+    "group_router",
 ]

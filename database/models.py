@@ -121,6 +121,7 @@ class RotationState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     anchor_date: Mapped[date] = mapped_column(Date, nullable=False, doc="Reference date for dynamic rotation offset")
     anchor_slot: Mapped[int] = mapped_column(Integer, nullable=False, default=0, doc="Slot index on anchor_date")
+    group_chat_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, doc="Active apartment group chat ID")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     def __repr__(self) -> str:

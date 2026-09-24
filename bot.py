@@ -18,6 +18,7 @@ from handlers import (
     rules_router,
     start_router,
     swap_router,
+    group_router,
 )
 from services.scheduler import setup_scheduler
 
@@ -79,6 +80,7 @@ async def main() -> None:
     dp.include_router(guest_router)
     dp.include_router(fund_router)
     dp.include_router(rules_router)
+    dp.include_router(group_router)
 
     # Initialize scheduler
     scheduler = setup_scheduler(bot)

@@ -21,6 +21,7 @@ from services.cleaning_service import (
 )
 from services.duty_service import (
     are_all_daily_tasks_done,
+    get_active_group_chat_id,
     get_duty_for_date,
     get_duty_votes_count,
     get_laundry_duty_for_date,
@@ -65,11 +66,12 @@ async def send_morning_reminder(bot: Bot) -> None:
         keyboard = get_daily_tasks_keyboard(tasks, today)
 
         # Broadcast to group
-        if settings.GROUP_CHAT_ID:
+        group_id = await get_active_group_chat_id(session)
+        if group_id:
             try:
-                await bot.send_message(chat_id=settings.GROUP_CHAT_ID, text=msg, reply_markup=keyboard)
+                await bot.send_message(chat_id=group_id, text=msg, reply_markup=keyboard)
             except Exception as e:
-                logger.error(f"Error sending morning reminder to group {settings.GROUP_CHAT_ID}: {e}")
+                logger.error(f"Error sending morning reminder to group {group_id}: {e}")
 
         # Send direct DM to duty user
         try:
@@ -105,11 +107,12 @@ async def send_evening_reminder(bot: Bot) -> None:
             f"<b>'✅ Navbatchilikni bajardim'</b> tugmasini bosing!"
         )
 
-        if settings.GROUP_CHAT_ID:
+        group_id = await get_active_group_chat_id(session)
+        if group_id:
             try:
-                await bot.send_message(chat_id=settings.GROUP_CHAT_ID, text=msg)
+                await bot.send_message(chat_id=group_id, text=msg)
             except Exception as e:
-                logger.error(f"Error sending evening reminder to group: {e}")
+                logger.error(f"Error sending evening reminder to group {group_id}: {e}")
 
         try:
             await bot.send_message(chat_id=user.id, text=msg)
@@ -165,11 +168,12 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
             f"Barchaga xayrli tun, xonadoshlar! Ertangi kunga yaxshi dam oling. 😴"
         )
 
-        if settings.GROUP_CHAT_ID:
+        group_id = await get_active_group_chat_id(session)
+        if group_id:
             try:
-                await bot.send_message(chat_id=settings.GROUP_CHAT_ID, text=msg)
+                await bot.send_message(chat_id=group_id, text=msg)
             except Exception as e:
-                logger.error(f"Error sending night quiet mode to group: {e}")
+                logger.error(f"Error sending night quiet mode to group {group_id}: {e}")
 
         try:
             await bot.send_message(chat_id=today_user.id, text=msg)
@@ -247,15 +251,16 @@ async def check_morning_10am_duty_status(bot: Bot) -> None:
             forgive_count=forgive_count,
         )
 
-        if settings.GROUP_CHAT_ID:
+        group_id = await get_active_group_chat_id(session)
+        if group_id:
             try:
                 await bot.send_message(
-                    chat_id=settings.GROUP_CHAT_ID,
+                    chat_id=group_id,
                     text=poll_text,
                     reply_markup=keyboard,
                 )
             except Exception as e:
-                logger.error(f"Error sending 10:00 voting poll to group: {e}")
+                logger.error(f"Error sending 10:00 voting poll to group {group_id}: {e}")
 
 
 async def send_saturday_morning_cleaning(bot: Bot) -> None:
@@ -270,6 +275,7 @@ async def send_saturday_morning_cleaning(bot: Bot) -> None:
     async with get_session() as session:
         shopper1, shopper2 = await get_weekend_grocery_duty(session, today)
         items = await get_or_create_week_checklist(session, weekend_sun)
+        group_id = await get_active_group_chat_id(session)
 
     sh1_name = f"<b>{shopper1.full_name}</b> ({shopper1.room_number}-Xona)" if shopper1 else "Belgilanmagan"
     sh2_name = f"<b>{shopper2.full_name}</b> ({shopper2.room_number}-Xona)" if shopper2 else "Belgilanmagan"
@@ -293,15 +299,15 @@ async def send_saturday_morning_cleaning(bot: Bot) -> None:
 
     keyboard = get_checklist_inline_keyboard(items, weekend_sun)
 
-    if settings.GROUP_CHAT_ID:
+    if group_id:
         try:
             await bot.send_message(
-                chat_id=settings.GROUP_CHAT_ID,
+                chat_id=group_id,
                 text=msg,
                 reply_markup=keyboard,
             )
         except Exception as e:
-            logger.error(f"Error sending Saturday cleaning reminder to group: {e}")
+            logger.error(f"Error sending Saturday cleaning reminder to group {group_id}: {e}")
 
 
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
