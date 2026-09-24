@@ -79,14 +79,55 @@ def get_daily_tasks_keyboard(
         cb = f"dtask_tog:{key}:{duty_date.isoformat()}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb)])
 
-    # Refresh row
+    # Refresh & Jazolash/E'tiroz row
     buttons.append([
         InlineKeyboardButton(
             text="🔄 Yangilash",
             callback_data=f"dtask_ref:{duty_date.isoformat()}",
-        )
+        ),
+        InlineKeyboardButton(
+            text="🚨 Jazolash / E'tiroz",
+            callback_data=f"dfraud_rep:{duty_date.isoformat()}",
+        ),
     ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_vote_keyboard(
+    duty_date: date,
+    target_user_id: int,
+    reason: str,
+    fine_count: int = 0,
+    forgive_count: int = 0,
+) -> InlineKeyboardMarkup:
+    """
+    Ovoz berish (Poll/Voting) tugmalari:
+    - INCOMPLETE holati: [⚖️ Jarima berilsin (15,000 so'm)] ({fine_count}) | [🤝 Uzrli / Kechirilsin] ({forgive_count})
+    - FRAUD holati:      [🔴 Ha, qoidabuzarlik (Jarima yozilsin)] ({fine_count}) | [⚪️ Yo'q, hammasi toza] ({forgive_count})
+    """
+    date_str = duty_date.isoformat()
+    if reason == "INCOMPLETE":
+        btn_fine_text = f"⚖️ Jarima berilsin (15,000 so'm) ({fine_count})"
+        btn_forgive_text = f"🤝 Uzrli / Kechirilsin ({forgive_count})"
+    else:
+        btn_fine_text = f"🔴 Ha, qoidabuzarlik (Jarima yozilsin) ({fine_count})"
+        btn_forgive_text = f"⚪️ Yo'q, hammasi toza ({forgive_count})"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text=btn_fine_text,
+                callback_data=f"dvote:FINE:{reason}:{target_user_id}:{date_str}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=btn_forgive_text,
+                callback_data=f"dvote:FORGIVE:{reason}:{target_user_id}:{date_str}",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def get_checklist_inline_keyboard(

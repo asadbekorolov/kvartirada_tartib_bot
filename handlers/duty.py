@@ -3,17 +3,22 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from sqlalchemy import select
+
 from config import settings
-from database.models import DutyStatus
+from database.models import DutyStatus, PenaltyFund, User
 from database.session import get_session
 from keyboards.inline import (
     DAILY_5_TASKS,
     get_daily_tasks_keyboard,
+    get_vote_keyboard,
     get_water_complete_keyboard,
 )
 from services.duty_service import (
+    cast_duty_vote,
     complete_water_duty,
     get_duty_for_date,
+    get_duty_votes_count,
     get_laundry_duty_for_date,
     get_or_create_daily_tasks,
     get_water_duty_schedule,
@@ -181,6 +186,136 @@ async def process_refresh_daily_tasks(callback: CallbackQuery):
     await callback.answer("🔄 Vazifalar holati yangilandi")
     try:
         await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("dfraud_rep:"))
+async def process_fraud_report(callback: CallbackQuery):
+    """Initiate anti-fraud investigation / voting poll on daily tasks."""
+    parts = callback.data.split(":")
+    duty_date = date.fromisoformat(parts[1])
+    reporter_id = callback.from_user.id
+
+    async with get_session() as session:
+        duty_user, record = await get_duty_for_date(session, duty_date)
+        if not duty_user:
+            await callback.answer("⚠️ Navbatchi topilmadi.", show_alert=True)
+            return
+
+        if reporter_id == duty_user.id:
+            await callback.answer("⚠️ O'zingizning ustingizdan e'tiroz bildira olmaysiz!", show_alert=True)
+            return
+
+        fine_count, forgive_count = await get_duty_votes_count(session, duty_date, "FRAUD")
+        # Check if fine was already applied
+        existing_fine = await session.execute(
+            select(PenaltyFund).where(
+                PenaltyFund.user_id == duty_user.id,
+                PenaltyFund.reason.like(f"%FRAUD%{duty_date}%"),
+            )
+        )
+        if existing_fine.scalar_one_or_none():
+            await callback.answer("⚠️ Ushbu holat bo'yicha allaqachon jarima belgilangan!", show_alert=True)
+            return
+
+    poll_text = (
+        f"🚨 <b>Adolat Sudi (Falsifikatsiya e'tirozi):</b>\n\n"
+        f"<b>{callback.from_user.full_name}</b> navbatchi <b>{duty_user.full_name}</b> "
+        f"vazifani haqiqatda bajarmasdan [✅] deb belgilaganini ma'lum qildi!\n\n"
+        f"Xonadoshlar, holatni tasdiqlaysizmi?\n"
+        f"<i>(Kamida 3 kishi tasdiqlasa, navbatchiga {settings.DAILY_FINE_AMOUNT:,} so'm jarima yoziladi)</i>"
+    )
+    keyboard = get_vote_keyboard(
+        duty_date=duty_date,
+        target_user_id=duty_user.id,
+        reason="FRAUD",
+        fine_count=fine_count,
+        forgive_count=forgive_count,
+    )
+
+    await callback.answer("🚨 Adolat sudi guruhga yuborildi!", show_alert=False)
+
+    if settings.GROUP_CHAT_ID:
+        try:
+            await callback.bot.send_message(
+                chat_id=settings.GROUP_CHAT_ID,
+                text=poll_text,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            await callback.message.answer(poll_text, reply_markup=keyboard)
+    else:
+        await callback.message.answer(poll_text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("dvote:"))
+async def process_duty_vote(callback: CallbackQuery):
+    """Process voting on fine/forgive for incomplete duty or fraud."""
+    parts = callback.data.split(":")
+    vote_type = parts[1]
+    reason = parts[2]
+    target_user_id = int(parts[3])
+    duty_date = date.fromisoformat(parts[4])
+    voter_id = callback.from_user.id
+
+    async with get_session() as session:
+        target_res = await session.execute(select(User).where(User.id == target_user_id))
+        target_user = target_res.scalar_one_or_none()
+        target_name = target_user.full_name if target_user else "Navbatchi"
+
+        success, status_code, fine_count, forgive_count, is_concluded = await cast_duty_vote(
+            session=session,
+            duty_date=duty_date,
+            voter_id=voter_id,
+            target_user_id=target_user_id,
+            vote_type=vote_type,
+            reason=reason,
+            threshold=3,
+        )
+
+    if status_code == "SELF_VOTE":
+        await callback.answer("⚠️ O'z navbatchiligingiz uchun ovoz bera olmaysiz!", show_alert=True)
+        return
+
+    if status_code == "ALREADY_CONCLUDED":
+        await callback.answer("⚠️ Ushbu masala bo'yicha allaqachon yakuniy qaror qabul qilingan!", show_alert=True)
+        return
+
+    if is_concluded:
+        if status_code == "FINE_APPLIED":
+            conclude_text = (
+                f"⚖️ <b>Qaror qabul qilindi: Jarima belgilandi!</b>\n\n"
+                f"Ko'pchilik xonadoshlar ({fine_count} ta ovoz) qoidabuzarlikni tasdiqladi.\n"
+                f"Navbatchi <b>{target_name}</b> ga <b>{settings.DAILY_FINE_AMOUNT:,} so'm</b> jarima yozildi va fondga kiritildi."
+            )
+            await callback.answer("⚖️ Qoidabuzarlik tasdiqlandi va jarima belgilandi!", show_alert=True)
+        else:
+            conclude_text = (
+                f"🤝 <b>Qaror qabul qilindi: Kechirildi!</b>\n\n"
+                f"Ko'pchilik xonadoshlar ({forgive_count} ta ovoz) sababni uzrli deb topdi.\n"
+                f"Navbatchi <b>{target_name}</b> ga jarima qo'llanmadi."
+            )
+            await callback.answer("🤝 Sabab uzrli deb topildi!", show_alert=True)
+
+        try:
+            await callback.message.edit_text(conclude_text)
+        except Exception:
+            pass
+        return
+
+    # If vote cast and still ongoing
+    new_kb = get_vote_keyboard(
+        duty_date=duty_date,
+        target_user_id=target_user_id,
+        reason=reason,
+        fine_count=fine_count,
+        forgive_count=forgive_count,
+    )
+    v_type_str = "Jarima" if vote_type == "FINE" else "Uzrli"
+    await callback.answer(f"Ovozingiz qabul qilindi ({v_type_str})! (Jarima: {fine_count} / Kechirish: {forgive_count})")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=new_kb)
     except Exception:
         pass
 

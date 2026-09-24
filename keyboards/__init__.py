@@ -11,6 +11,7 @@ from keyboards.inline import (
     get_room_selection_keyboard,
     get_swap_candidates_keyboard,
     get_swap_request_keyboard,
+    get_vote_keyboard,
     get_water_complete_keyboard,
 )
 
@@ -21,6 +22,7 @@ __all__ = [
     "get_room_selection_keyboard",
     "get_day_slots_keyboard",
     "get_daily_tasks_keyboard",
+    "get_vote_keyboard",
     "get_checklist_inline_keyboard",
     "get_swap_candidates_keyboard",
     "get_swap_request_keyboard",

@@ -4,12 +4,15 @@ from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from sqlalchemy import select
+
 from config import settings
-from database.models import DutyStatus
+from database.models import DutyStatus, PenaltyFund
 from database.session import get_session
 from keyboards.inline import (
     get_checklist_inline_keyboard,
     get_daily_tasks_keyboard,
+    get_vote_keyboard,
 )
 from services.cleaning_service import (
     get_or_create_week_checklist,
@@ -17,8 +20,9 @@ from services.cleaning_service import (
     render_progress_bar,
 )
 from services.duty_service import (
-    apply_missed_duty_fine,
+    are_all_daily_tasks_done,
     get_duty_for_date,
+    get_duty_votes_count,
     get_laundry_duty_for_date,
     get_or_create_daily_tasks,
     get_weekend_grocery_duty,
@@ -117,7 +121,7 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
     """
     22:30 Kechki sukunat rejimi va kunlik yakun:
     1. Soat 22:30 — Kechki sukunat vaqti talabi
-    2. Navbatchilik holati tekshiruvi (jarima)
+    2. Navbatchiga ertaga 10:00 gacha muddat borligi eslatmasi (Avtomatik jarima olib tashlangan)
     3. Ertangi navbatchi e'loni
     """
     today = date.today()
@@ -126,23 +130,21 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
     async with get_session() as session:
         today_user, today_record = await get_duty_for_date(session, today)
         tomorrow_user, _ = await get_duty_for_date(session, tomorrow)
+        tasks = await get_or_create_daily_tasks(session, today)
 
         if not today_user:
             return
 
-        fine_applied = False
-        if not today_record or today_record.status != DutyStatus.COMPLETED:
-            fine = await apply_missed_duty_fine(session, today)
-            fine_applied = fine is not None
+        done_count = sum(1 for t in tasks if t.is_done)
+        all_done = (done_count == len(tasks)) and len(tasks) > 0
 
-        status_text = "✅ <b>Vazifalar to'liq bajarildi</b>"
-        if fine_applied:
+        if all_done:
+            status_text = "✅ <b>Vazifalar to'liq bajarildi (5/5)</b>"
+        else:
             status_text = (
-                f"❌ <b>Vazifalar bajarilmadi!</b>\n"
-                f"⚠️ <i>Jarima jamg'armasiga {settings.DAILY_FINE_AMOUNT:,} so'm jarima yozildi.</i>"
+                f"⏳ <b>Vazifalar jarayonda ({done_count}/5 bajarildi)</b>\n"
+                f"💡 <i>Eslatma: Agar vazifalarni to'liq yakunlashga ulgurmagan bo'lsangiz, ertaga soat 10:00 gacha vaqtingiz bor.</i>"
             )
-        elif not today_record or today_record.status != DutyStatus.COMPLETED:
-            status_text = "⏳ <b>Bajarilmadi</b>"
 
         tomorrow_info = (
             f"🌅 <b>Ertangi navbatchi:</b> <b>{tomorrow_user.full_name}</b> ({tomorrow_user.room_number}-Xona)"
@@ -174,6 +176,18 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
         except Exception as e:
             logger.warning(f"Could not send night summary to user {today_user.id}: {e}")
 
+        if not all_done:
+            try:
+                reminder_dm = (
+                    f"🌙 <b>Eslatma, {today_user.full_name}:</b>\n\n"
+                    f"Bugungi navbatchilik vazifalarini to'liq yakunlashga ulgurmagan bo'lsangiz, "
+                    f"<b>ertaga soat 10:00 gacha</b> vaqtingiz bor.\n"
+                    f"Ertaga soat 10:00 da yakunlanmagan vazifalar xonadoshlar ovoziga qo'yiladi."
+                )
+                await bot.send_message(chat_id=today_user.id, text=reminder_dm)
+            except Exception as e:
+                logger.warning(f"Could not send grace period reminder to {today_user.id}: {e}")
+
         if tomorrow_user and tomorrow_user.id != today_user.id:
             try:
                 t_msg = (
@@ -183,6 +197,65 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
                 await bot.send_message(chat_id=tomorrow_user.id, text=t_msg)
             except Exception as e:
                 logger.warning(f"Could not notify tomorrow user: {e}")
+
+
+async def check_morning_10am_duty_status(bot: Bot) -> None:
+    """
+    10:00 AM Grace Period tekshiruvi:
+    Kechagi kunning 5 ta vazifasini tekshiradi:
+    1. Agar 5 ta vazifa to'liq [✅] bo'lgan bo'lsa: Muvaffaqiyatli yopiladi.
+    2. Agar 1 yoki undan ko'p vazifa [❌] qolgan bo'lsa:
+       Guruhga ovoz berish (Poll) so'rovini chiqaradi:
+       "⚠️ Kechagi navbatchi {Navbatchi Ismi} soat 10:00 gacha barcha vazifalarni yakunlamadi.
+       Qolgan xonadoshlar, jarimaga tortilsinmi yoki kechirilsinmi?"
+    """
+    yesterday = date.today() - timedelta(days=1)
+
+    async with get_session() as session:
+        user, record = await get_duty_for_date(session, yesterday)
+        if not user:
+            return
+
+        all_done = await are_all_daily_tasks_done(session, yesterday)
+        if all_done:
+            logger.info(f"10:00 Check: Kechagi ({yesterday}) vazifalar to'liq bajarilgan.")
+            return
+
+        # Check if already fine was recorded or concluded
+        fine_count, forgive_count = await get_duty_votes_count(session, yesterday, "INCOMPLETE")
+        existing_fine = await session.execute(
+            select(PenaltyFund).where(
+                PenaltyFund.user_id == user.id,
+                PenaltyFund.reason.like(f"%INCOMPLETE%{yesterday}%"),
+            )
+        )
+        if existing_fine.scalar_one_or_none():
+            return
+
+        poll_text = (
+            f"⚠️ <b>Navbatchilik Vazifalari Bo'yicha Ovoz Berish (10:00 Yakun)</b>\n\n"
+            f"Kechagi navbatchi <b>{user.full_name}</b> (🏢 {user.room_number}-Xona) "
+            f"soat 10:00 gacha barcha vazifalarni to'liq yakunlamadi.\n\n"
+            f"Qolgan xonadoshlar, jarimaga tortilsinmi yoki kechirilsinmi?\n\n"
+            f"<i>(Ko'pchilik ovozi bilan {settings.DAILY_FINE_AMOUNT:,} so'm jarima yoziladi yoki kechiriladi)</i>"
+        )
+        keyboard = get_vote_keyboard(
+            yesterday,
+            user.id,
+            reason="INCOMPLETE",
+            fine_count=fine_count,
+            forgive_count=forgive_count,
+        )
+
+        if settings.GROUP_CHAT_ID:
+            try:
+                await bot.send_message(
+                    chat_id=settings.GROUP_CHAT_ID,
+                    text=poll_text,
+                    reply_markup=keyboard,
+                )
+            except Exception as e:
+                logger.error(f"Error sending 10:00 voting poll to group: {e}")
 
 
 async def send_saturday_morning_cleaning(bot: Bot) -> None:
@@ -245,7 +318,17 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 2. 20:00 PM Daily Evening Warning
+    # 2. 10:00 AM Daily Grace Period Check & Voting Poll
+    scheduler.add_job(
+        check_morning_10am_duty_status,
+        trigger=CronTrigger(hour=10, minute=0),
+        args=[bot],
+        id="morning_10am_duty_check",
+        name="10:00 Kunlik vazifalar yakuni va ovoz berish",
+        replace_existing=True,
+    )
+
+    # 3. 20:00 PM Daily Evening Warning
     scheduler.add_job(
         send_evening_reminder,
         trigger=CronTrigger(hour=20, minute=0),
@@ -255,7 +338,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 3. 22:30 PM Daily Quiet Mode & Summary
+    # 4. 22:30 PM Daily Quiet Mode & Summary (No auto-fine; 10:00 AM grace period notice)
     scheduler.add_job(
         send_night_quiet_mode_and_summary,
         trigger=CronTrigger(hour=22, minute=30),
@@ -265,7 +348,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 4. Saturday 09:00 AM Grocery Shopping & Deep Cleaning Checklist
+    # 5. Saturday 09:00 AM Grocery Shopping & Deep Cleaning Checklist
     scheduler.add_job(
         send_saturday_morning_cleaning,
         trigger=CronTrigger(day_of_week="sat", hour=9, minute=0),

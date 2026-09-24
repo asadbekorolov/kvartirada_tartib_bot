@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
+from sqlalchemy import select
+
 from database.models import DutyStatus, Expense, ExpenseShare, PenaltyFund, RotationState, User
 from database.session import engine, get_session, init_db
 from services.cleaning_service import (
@@ -191,11 +193,81 @@ async def run_tests():
         # When all 5 are done, duty record must be COMPLETED and no fine applied
         fine_res = await apply_missed_duty_fine(session, test_duty_date)
         assert fine_res is None
-        print(" [PASS] 12. 5 talik Kunlik Checklist, avtomatik COMPLETED va jarima nazorati muvaffaqiyatli tekshirildi.")
+        print(" [PASS] 11. 5 talik Kunlik Checklist, avtomatik COMPLETED muvaffaqiyatli tekshirildi.")
+
+        # 12. Test Ovoz berish tizimi (Poll/Voting - INCOMPLETE)
+        from services.duty_service import cast_duty_vote, get_duty_votes_count
+
+        vote_date = date.today() - timedelta(days=2)
+        target_uid = 101 # Asadbek
+
+        # Target user attempts to vote for himself -> blocked!
+        ok_self, code_self, _, _, _ = await cast_duty_vote(
+            session, vote_date, voter_id=101, target_user_id=target_uid, vote_type="FORGIVE", reason="INCOMPLETE"
+        )
+        assert ok_self is False
+        assert code_self == "SELF_VOTE"
+
+        # 3 other roommates vote FINE
+        ok_v1, code_v1, f_cnt1, _, conc1 = await cast_duty_vote(
+            session, vote_date, voter_id=102, target_user_id=target_uid, vote_type="FINE", reason="INCOMPLETE"
+        )
+        assert ok_v1 is True and code_v1 == "VOTE_CAST" and f_cnt1 == 1 and conc1 is False
+
+        ok_v2, code_v2, f_cnt2, _, conc2 = await cast_duty_vote(
+            session, vote_date, voter_id=103, target_user_id=target_uid, vote_type="FINE", reason="INCOMPLETE"
+        )
+        assert ok_v2 is True and code_v2 == "VOTE_CAST" and f_cnt2 == 2 and conc2 is False
+
+        # 3rd vote reaches threshold -> FINE_APPLIED
+        ok_v3, code_v3, f_cnt3, _, conc3 = await cast_duty_vote(
+            session, vote_date, voter_id=105, target_user_id=target_uid, vote_type="FINE", reason="INCOMPLETE"
+        )
+        assert ok_v3 is True and code_v3 == "FINE_APPLIED" and f_cnt3 == 3 and conc3 is True
+
+        # Check penalty fund entry
+        fine_q = await session.execute(
+            select(PenaltyFund).where(
+                PenaltyFund.user_id == target_uid,
+                PenaltyFund.reason.like(f"%INCOMPLETE%{vote_date}%"),
+            )
+        )
+        assert fine_q.scalar_one_or_none() is not None
+
+        # Subsequent vote returns ALREADY_CONCLUDED
+        ok_after, code_after, _, _, _ = await cast_duty_vote(
+            session, vote_date, voter_id=106, target_user_id=target_uid, vote_type="FINE", reason="INCOMPLETE"
+        )
+        assert ok_after is False and code_after == "ALREADY_CONCLUDED"
+        print(" [PASS] 12. Ovoz berish tizimi (INCOMPLETE): O'ziga ovoz berish bloklandi, 3 ta ovoz bilan jarima belgilandi.")
+
+        # 13. Test Anti-Fraud Jazolash va Uzrli deb topish (FRAUD - FORGIVEN)
+        fraud_date = date.today() - timedelta(days=3)
+        target_uid_2 = 102 # Nodir
+
+        # 3 roommates vote FORGIVE
+        for v_id in [101, 103, 105]:
+            _, code, _, fg_cnt, is_c = await cast_duty_vote(
+                session, fraud_date, voter_id=v_id, target_user_id=target_uid_2, vote_type="FORGIVE", reason="FRAUD"
+            )
+
+        assert code == "FORGIVEN"
+        assert fg_cnt == 3
+        assert is_c is True
+
+        # No penalty should be recorded
+        fraud_fine_q = await session.execute(
+            select(PenaltyFund).where(
+                PenaltyFund.user_id == target_uid_2,
+                PenaltyFund.reason.like(f"%FRAUD%{fraud_date}%"),
+            )
+        )
+        assert fraud_fine_q.scalar_one_or_none() is None
+        print(" [PASS] 13. Anti-Fraud Jazolash va Kechirish (FORGIVEN) ovoz berishi muvaffaqiyatli tekshirildi.")
 
     await engine.dispose()
     print("=" * 70)
-    print("BARCHA 12 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
+    print("BARCHA 13 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
     print("=" * 70)
 
 

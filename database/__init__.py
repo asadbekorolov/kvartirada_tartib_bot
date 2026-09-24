@@ -10,6 +10,7 @@ from database.models import (
     ExpenseShare,
     DutyType,
     DutyStatus,
+    DutyVote,
 )
 from database.session import engine, async_session_factory, get_session, init_db
 
@@ -19,6 +20,7 @@ __all__ = [
     "DutyHistory",
     "CleaningChecklistState",
     "DailyTaskState",
+    "DutyVote",
     "PenaltyFund",
     "RotationState",
     "Expense",

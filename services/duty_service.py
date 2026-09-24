@@ -10,6 +10,7 @@ from database.models import (
     DutyHistory,
     DutyStatus,
     DutyType,
+    DutyVote,
     PenaltyFund,
     RotationState,
     User,
@@ -634,3 +635,120 @@ async def apply_missed_duty_fine(
     session.add(fine)
     await session.commit()
     return fine
+
+
+async def get_duty_votes_count(
+    session: AsyncSession,
+    duty_date: date,
+    reason: str,
+) -> Tuple[int, int]:
+    """Return (fine_count, forgive_count) for given date and reason."""
+    res_fine = await session.execute(
+        select(func.count(DutyVote.id)).where(
+            DutyVote.duty_date == duty_date,
+            DutyVote.reason == reason,
+            DutyVote.vote_type == "FINE",
+        )
+    )
+    fine_count = res_fine.scalar_one() or 0
+
+    res_forgive = await session.execute(
+        select(func.count(DutyVote.id)).where(
+            DutyVote.duty_date == duty_date,
+            DutyVote.reason == reason,
+            DutyVote.vote_type == "FORGIVE",
+        )
+    )
+    forgive_count = res_forgive.scalar_one() or 0
+
+    return fine_count, forgive_count
+
+
+async def cast_duty_vote(
+    session: AsyncSession,
+    duty_date: date,
+    voter_id: int,
+    target_user_id: int,
+    vote_type: str,
+    reason: str,
+    threshold: int = 3,
+) -> Tuple[bool, str, int, int, bool]:
+    """
+    Record or update a vote on duty penalty/forgive.
+    Returns: (success, status_code, fine_count, forgive_count, is_concluded)
+    status_codes:
+      - 'SELF_VOTE': Target user cannot vote for themselves.
+      - 'ALREADY_CONCLUDED': Vote concluded and penalty already applied.
+      - 'FINE_APPLIED': Threshold reached and 15,000 UZS penalty recorded.
+      - 'FORGIVEN': Threshold reached to forgive.
+      - 'VOTE_CAST': Vote registered, waiting for more votes.
+    """
+    if voter_id == target_user_id:
+        f_cnt, fg_cnt = await get_duty_votes_count(session, duty_date, reason)
+        return False, "SELF_VOTE", f_cnt, fg_cnt, False
+
+    # Check if penalty was already applied for this reason & date
+    existing_fine = await session.execute(
+        select(PenaltyFund).where(
+            PenaltyFund.user_id == target_user_id,
+            PenaltyFund.reason.like(f"%{reason}%{duty_date}%"),
+        )
+    )
+    if existing_fine.scalar_one_or_none():
+        f_cnt, fg_cnt = await get_duty_votes_count(session, duty_date, reason)
+        return False, "ALREADY_CONCLUDED", f_cnt, fg_cnt, True
+
+    # Record or update vote
+    res = await session.execute(
+        select(DutyVote).where(
+            DutyVote.duty_date == duty_date,
+            DutyVote.voter_id == voter_id,
+            DutyVote.reason == reason,
+        )
+    )
+    existing_vote = res.scalar_one_or_none()
+
+    if existing_vote:
+        existing_vote.vote_type = vote_type
+    else:
+        new_vote = DutyVote(
+            duty_date=duty_date,
+            voter_id=voter_id,
+            target_user_id=target_user_id,
+            vote_type=vote_type,
+            reason=reason,
+        )
+        session.add(new_vote)
+
+    await session.commit()
+
+    fine_count, forgive_count = await get_duty_votes_count(session, duty_date, reason)
+
+    # Check conclusion by threshold
+    if fine_count >= threshold:
+        # Apply penalty
+        fine_record = PenaltyFund(
+            user_id=target_user_id,
+            amount=settings.DAILY_FINE_AMOUNT,
+            reason=f"Ovoz berish natijasida jarima ({reason}: {duty_date})",
+            is_paid=False,
+        )
+        session.add(fine_record)
+
+        hist_res = await session.execute(
+            select(DutyHistory).where(
+                DutyHistory.duty_date == duty_date,
+                DutyHistory.duty_type == DutyType.DAILY,
+            )
+        )
+        hist = hist_res.scalar_one_or_none()
+        if hist:
+            hist.status = DutyStatus.FINED
+        await session.commit()
+        return True, "FINE_APPLIED", fine_count, forgive_count, True
+
+    elif forgive_count >= threshold:
+        return True, "FORGIVEN", fine_count, forgive_count, True
+
+    return True, "VOTE_CAST", fine_count, forgive_count, False
+

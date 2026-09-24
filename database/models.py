@@ -177,4 +177,27 @@ class DailyTaskState(Base):
         return f"<DailyTaskState(date={self.duty_date}, task='{self.task_key}', done={self.is_done}, by={self.completed_by})>"
 
 
+class DutyVote(Base):
+    """
+    Ovoz berish tizimi (Jarima berilsinmi yoki kechirilsinmi / Falsifikatsiya sudi).
+    """
+    __tablename__ = "duty_votes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    duty_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    voter_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    target_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    vote_type: Mapped[str] = mapped_column(String(20), nullable=False)  # 'FINE' yoki 'FORGIVE'
+    reason: Mapped[str] = mapped_column(String(50), nullable=False)  # 'INCOMPLETE' yoki 'FRAUD'
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    voter: Mapped["User"] = relationship("User", foreign_keys=[voter_id])
+    target_user: Mapped["User"] = relationship("User", foreign_keys=[target_user_id])
+
+    def __repr__(self) -> str:
+        return f"<DutyVote(date={self.duty_date}, voter={self.voter_id}, target={self.target_user_id}, type={self.vote_type}, reason={self.reason})>"
+
+
+
 
