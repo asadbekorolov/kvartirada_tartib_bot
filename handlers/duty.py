@@ -6,15 +6,20 @@ from aiogram.types import CallbackQuery, Message
 from config import settings
 from database.models import DutyStatus
 from database.session import get_session
-from keyboards.inline import get_duty_complete_keyboard, get_water_complete_keyboard
+from keyboards.inline import (
+    DAILY_5_TASKS,
+    get_daily_tasks_keyboard,
+    get_water_complete_keyboard,
+)
 from services.duty_service import (
     complete_water_duty,
     get_duty_for_date,
     get_laundry_duty_for_date,
+    get_or_create_daily_tasks,
     get_water_duty_schedule,
     get_weekly_schedule,
     get_weekend_grocery_duty,
-    mark_daily_duty_completed,
+    toggle_daily_task,
 )
 
 router = Router(name="duty_router")
@@ -29,26 +34,72 @@ UZ_DAYS = {
     6: "Yakshanba",
 }
 
-DUTY_5_TASKS = (
-    "<b>Kunlik navbatchining 5 ta asosiy vazifasi:</b>\n"
-    "1️⃣ 🍲 <b>Ovqat:</b> Kechki taomni tayyorlash yoki umumiy ovqatga qarash\n"
-    "2️⃣ 🍞 <b>Non va dasturxon:</b> Dasturxon atrofini toza saqlash, non bo'lishini nazorat qilish\n"
-    "3️⃣ 🧽 <b>Xontaxta:</b> Xontaxta va oshxona stollarini nam latta bilan artib tozalash\n"
-    "4️⃣ 🍳 <b>Idishlar:</b> Umumiy idish-tovoqlar va qozonlarni yuvib qo'yish\n"
-    "5️⃣ 🗑 <b>Axlat:</b> Oshxona va hojatxona axlat chelaklarini to'plash va tashlab kelish"
-)
+
+def render_duty_text(
+    duty_date: date,
+    user,
+    record,
+    laundry_user,
+    tasks,
+) -> str:
+    day_name = UZ_DAYS[duty_date.weekday()]
+    done_count = sum(1 for t in tasks if t.is_done)
+    all_done = (done_count == len(DAILY_5_TASKS))
+
+    if all_done:
+        status_str = "✅ <b>Barcha vazifalar to'liq bajarildi (5/5)</b>"
+    elif record and record.status == DutyStatus.FINED:
+        status_str = "❌ <b>Bajarilmadi (Jarima qo'llangan)</b>"
+    elif record and record.status == DutyStatus.SWAPPED:
+        status_str = "🔄 <b>O'zaro almashtirilgan</b>"
+    else:
+        status_str = f"⏳ <b>Bajarilishi kutilmoqda ({done_count}/5 bajarildi)</b>"
+
+    user_name = user.full_name if user else "Belgilanmagan"
+    room_info = f"{user.room_number}-Xona" if user else "—"
+
+    laundry_text = (
+        f"🧺 <b>Bugungi kir yuvish huquqi:</b> <b>{laundry_user.full_name}</b> ({laundry_user.room_number}-Xona)"
+        if laundry_user
+        else "🧺 <i>Kir yuvish navbatchisi topilmadi</i>"
+    )
+
+    if all_done:
+        return (
+            f"🎉 <b>Bugungi barcha kunlik vazifalar to'liq bajarildi!</b>\n\n"
+            f"📅 Sana: <b>{duty_date.strftime('%d.%m.%Y')} ({day_name})</b>\n"
+            f"🧹 Navbatchi: <b>{user_name}</b> (🏢 {room_info})\n"
+            f"📌 Holat: {status_str}\n\n"
+            f"{laundry_text}\n\n"
+            f"Kvartirada tozalik va ozodalikni ta'minlaganingiz uchun tashakkur, <b>{user_name}</b>! ✨"
+        )
+
+    return (
+        f"📋 <b>Bugungi Kunlik Navbatchilik Checklisti:</b>\n\n"
+        f"📅 Sana: <b>{duty_date.strftime('%d.%m.%Y')} ({day_name})</b>\n"
+        f"🧹 Navbatchi: <b>{user_name}</b> (🏢 {room_info})\n"
+        f"📌 Holat: {status_str}\n\n"
+        f"{laundry_text}\n\n"
+        f"<b>Kunlik 5 ta asosiy vazifa:</b>\n"
+        f"1. 🍲 Kechki taom / ovqat\n"
+        f"2. 🍞 Non olib kelish\n"
+        f"3. 🧽 Xontaxta va stollarni artish\n"
+        f"4. 🍳 Qozon va umumiy idishlar\n"
+        f"5. 🗑 Oshxona va hojatxona axlati\n\n"
+        f"<i>Vazifalarni bajarganingiz sari quyidagi tugmalarni bosib tasdiqlang:</i>"
+    )
 
 
 @router.message(F.text == "📋 Bugun")
 @router.message(Command("bugun"))
 async def handle_today_duty(message: Message):
-    """Show today's daily duty holder, 5 main tasks, and laundry slot holder."""
+    """Show today's daily duty holder, 5 checklist tasks, and laundry slot holder."""
     today = date.today()
-    day_name = UZ_DAYS[today.weekday()]
 
     async with get_session() as session:
         user, record = await get_duty_for_date(session, today)
         laundry_user = await get_laundry_duty_for_date(session, today)
+        tasks = await get_or_create_daily_tasks(session, today)
 
     if not user:
         await message.answer(
@@ -57,69 +108,81 @@ async def handle_today_duty(message: Message):
         )
         return
 
-    status_str = "⏳ <b>Bajarilishi kutilmoqda</b>"
-    if record:
-        if record.status == DutyStatus.COMPLETED:
-            status_str = "✅ <b>Muvaffaqiyatli bajarildi</b>"
-        elif record.status == DutyStatus.SWAPPED:
-            status_str = "🔄 <b>O'zaro almashtirilgan</b>"
-        elif record.status == DutyStatus.FINED:
-            status_str = "❌ <b>Bajarilmadi (Jarima qo'llangan)</b>"
-
-    laundry_text = (
-        f"🧺 <b>Bugungi kir yuvish huquqi:</b> <b>{laundry_user.full_name}</b> ({laundry_user.room_number}-Xona)"
-        if laundry_user
-        else "🧺 <i>Kir yuvish navbatchisi topilmadi</i>"
-    )
-
-    text = (
-        f"📋 <b>Bugungi Kunlik Navbatchilik:</b>\n\n"
-        f"📅 Sana: <b>{today.strftime('%d.%m.%Y')} ({day_name})</b>\n"
-        f"🧹 Navbatchi: <b>{user.full_name}</b>\n"
-        f"🏢 Xona: <b>{user.room_number}-Xona</b> (Tartib: {user.order_index})\n"
-        f"📌 Holat: {status_str}\n\n"
-        f"{laundry_text}\n\n"
-        f"{DUTY_5_TASKS}\n\n"
-        f"<i>Vazifalarni yakunlagach, quyidagi tugma orqali tasdiqlang:</i>"
-    )
-
-    keyboard = get_duty_complete_keyboard(today)
+    text = render_duty_text(today, user, record, laundry_user, tasks)
+    keyboard = get_daily_tasks_keyboard(tasks, today)
     await message.answer(text, reply_markup=keyboard)
 
 
-@router.callback_query(F.data.startswith("duty_complete:"))
-async def process_duty_complete(callback: CallbackQuery):
-    """Mark daily duty as completed."""
-    date_str = callback.data.split(":")[1]
-    target_date = date.fromisoformat(date_str)
+@router.callback_query(F.data.startswith("dtask_tog:"))
+async def process_toggle_daily_task(callback: CallbackQuery):
+    """Toggle one of the 5 daily checklist tasks."""
+    parts = callback.data.split(":")
+    task_key = parts[1]
+    duty_date = date.fromisoformat(parts[2])
 
     async with get_session() as session:
-        record = await mark_daily_duty_completed(
+        task_item, new_status, is_all_completed, completed_count = await toggle_daily_task(
             session=session,
+            duty_date=duty_date,
+            task_key=task_key,
             user_id=callback.from_user.id,
-            duty_date=target_date,
         )
+        tasks = await get_or_create_daily_tasks(session, duty_date)
+        user, record = await get_duty_for_date(session, duty_date)
+        laundry_user = await get_laundry_duty_for_date(session, duty_date)
 
-    await callback.answer("✅ Navbatchilik bajarildi deb belgilandi!", show_alert=True)
-    await callback.message.edit_text(
-        f"🎉 <b>Rahmat! Bugungi barcha 5 ta vazifa to'liq bajarildi deb qabul qilindi.</b>\n\n"
-        f"📅 Sana: <b>{target_date.strftime('%d.%m.%Y')}</b>\n"
-        f"👤 Bajaruvchi: <b>{callback.from_user.full_name}</b>\n"
-        f"✅ Holat: <b>Bajarildi</b>\n\n"
-        f"<i>Kvartirada tozalik va ozodalik ta'minlandi! ✨</i>"
-    )
+    task_title = DAILY_5_TASKS.get(task_key, task_key)
+    stat_msg = "✅ Bajarildi" if new_status else "❌ Bajarilmadi"
 
-    if settings.GROUP_CHAT_ID:
+    if is_all_completed:
+        user_name = user.full_name if user else callback.from_user.full_name
+        await callback.answer("🎉 Barcha 5 ta vazifa to'liq bajarildi!", show_alert=True)
+        text = render_duty_text(duty_date, user, record, laundry_user, tasks)
+        kb = get_daily_tasks_keyboard(tasks, duty_date)
         try:
-            await callback.bot.send_message(
-                chat_id=settings.GROUP_CHAT_ID,
-                text=(
-                    f"✅ <b>{callback.from_user.full_name}</b> bugungi navbatchilik vazifalarini "
-                    f"(ovqat, dasturxon, idishlar va axlat) to'liq yakunladi. Rahmat! ✨"
-                ),
-            )
+            await callback.message.edit_text(text, reply_markup=kb)
         except Exception:
             pass
+
+        if settings.GROUP_CHAT_ID:
+            try:
+                await callback.bot.send_message(
+                    chat_id=settings.GROUP_CHAT_ID,
+                    text=(
+                        f"🎉 <b>Bugungi barcha kunlik vazifalar to'liq bajarildi!</b>\n\n"
+                        f"Kvartirada tozalik va ozodalikni ta'minlaganingiz uchun tashakkur, <b>{user_name}</b>! ✨"
+                    ),
+                )
+            except Exception:
+                pass
+    else:
+        await callback.answer(f"{task_title}: {stat_msg} ({completed_count}/5)")
+        text = render_duty_text(duty_date, user, record, laundry_user, tasks)
+        kb = get_daily_tasks_keyboard(tasks, duty_date)
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("dtask_ref:"))
+async def process_refresh_daily_tasks(callback: CallbackQuery):
+    """Refresh daily tasks checklist."""
+    parts = callback.data.split(":")
+    duty_date = date.fromisoformat(parts[1])
+
+    async with get_session() as session:
+        user, record = await get_duty_for_date(session, duty_date)
+        laundry_user = await get_laundry_duty_for_date(session, duty_date)
+        tasks = await get_or_create_daily_tasks(session, duty_date)
+
+    text = render_duty_text(duty_date, user, record, laundry_user, tasks)
+    kb = get_daily_tasks_keyboard(tasks, duty_date)
+    await callback.answer("🔄 Vazifalar holati yangilandi")
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
 
 
 @router.message(F.text == "📅 Ertaga")

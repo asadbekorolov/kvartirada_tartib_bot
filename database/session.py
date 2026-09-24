@@ -35,6 +35,16 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables in the database if they do not exist."""
+    """Create all tables in the database if they do not exist, and migrate missing columns."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        def migrate_schema(sync_conn):
+            # Check and add assigned_day if not present in users table
+            try:
+                sync_conn.exec_driver_sql("ALTER TABLE users ADD COLUMN assigned_day INTEGER")
+            except Exception:
+                pass
+
+        await conn.run_sync(migrate_schema)
+

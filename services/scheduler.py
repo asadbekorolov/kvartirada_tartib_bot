@@ -7,7 +7,10 @@ from apscheduler.triggers.cron import CronTrigger
 from config import settings
 from database.models import DutyStatus
 from database.session import get_session
-from keyboards.inline import get_checklist_inline_keyboard
+from keyboards.inline import (
+    get_checklist_inline_keyboard,
+    get_daily_tasks_keyboard,
+)
 from services.cleaning_service import (
     get_or_create_week_checklist,
     get_weekend_date_for,
@@ -17,6 +20,7 @@ from services.duty_service import (
     apply_missed_duty_fine,
     get_duty_for_date,
     get_laundry_duty_for_date,
+    get_or_create_daily_tasks,
     get_weekend_grocery_duty,
 )
 
@@ -32,6 +36,7 @@ async def send_morning_reminder(bot: Bot) -> None:
     async with get_session() as session:
         user, record = await get_duty_for_date(session, today)
         laundry_user = await get_laundry_duty_for_date(session, today)
+        tasks = await get_or_create_daily_tasks(session, today)
 
         if not user:
             logger.info("Morning reminder: Faol a'zolar topilmadi.")
@@ -51,19 +56,20 @@ async def send_morning_reminder(bot: Bot) -> None:
             f"3️⃣ 🧽 <b>Xontaxta:</b> Xontaxta va oshxona stollarini nam latta bilan tozalab artish\n"
             f"4️⃣ 🍳 <b>Idishlar:</b> Umumiy idish-tovoqlar va qozonlarni yuvib qo'yish\n"
             f"5️⃣ 🗑 <b>Axlat:</b> Oshxona va hojatxona axlat chelaklarini to'plash va to'kib kelish\n\n"
-            f"<i>Kun oxirida vazifalarni yakunlab, /bugun orqali '✅ Bajardim' deb belgilashni unutmang!</i>"
+            f"<i>Vazifalarni bajarganingiz sari pastdagi tugmalar orqali belgilang:</i>"
         )
+        keyboard = get_daily_tasks_keyboard(tasks, today)
 
         # Broadcast to group
         if settings.GROUP_CHAT_ID:
             try:
-                await bot.send_message(chat_id=settings.GROUP_CHAT_ID, text=msg)
+                await bot.send_message(chat_id=settings.GROUP_CHAT_ID, text=msg, reply_markup=keyboard)
             except Exception as e:
                 logger.error(f"Error sending morning reminder to group {settings.GROUP_CHAT_ID}: {e}")
 
         # Send direct DM to duty user
         try:
-            await bot.send_message(chat_id=user.id, text=msg)
+            await bot.send_message(chat_id=user.id, text=msg, reply_markup=keyboard)
         except Exception as e:
             logger.warning(f"Could not send direct message to user {user.id}: {e}")
 

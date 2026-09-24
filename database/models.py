@@ -41,6 +41,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     room_number: Mapped[int] = mapped_column(Integer, nullable=False, doc="Room number: 1 or 2")
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0, doc="Position in Round-Robin queue")
+    assigned_day: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, doc="0=Dushanba, ..., 6=Yakshanba, 7=Zaxira")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, doc="Whether user is currently living in apartment")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -158,5 +159,22 @@ class ExpenseShare(Base):
 
     def __repr__(self) -> str:
         return f"<ExpenseShare(id={self.id}, expense_id={self.expense_id}, user_id={self.user_id}, is_paid={self.is_paid})>"
+
+
+class DailyTaskState(Base):
+    __tablename__ = "daily_task_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    duty_date: Mapped[date] = mapped_column(Date, nullable=False, doc="Date of the daily duty")
+    task_key: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    completed_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    # Relationship
+    completed_by_user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[completed_by])
+
+    def __repr__(self) -> str:
+        return f"<DailyTaskState(date={self.duty_date}, task='{self.task_key}', done={self.is_done}, by={self.completed_by})>"
+
 
 

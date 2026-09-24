@@ -1,10 +1,12 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from config import settings
 from database.models import (
+    DailyTaskState,
     DutyHistory,
     DutyStatus,
     DutyType,
@@ -12,6 +14,7 @@ from database.models import (
     RotationState,
     User,
 )
+from keyboards.inline import DAILY_5_TASKS, SLOT_NAMES
 
 
 async def get_active_users(session: AsyncSession) -> List[User]:
@@ -24,11 +27,52 @@ async def get_active_users(session: AsyncSession) -> List[User]:
     return list(result.scalars().all())
 
 
+async def get_occupied_slots_map(session: AsyncSession) -> Dict[int, User]:
+    """Return dictionary mapping assigned_day (0..7) to active User."""
+    result = await session.execute(
+        select(User)
+        .where(User.is_active.is_(True), User.assigned_day.isnot(None))
+    )
+    users = result.scalars().all()
+    return {u.assigned_day: u for u in users}
+
+
+async def assign_user_slot(
+    session: AsyncSession,
+    user_id: int,
+    day_index: int,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Assign a chosen day slot (0..7) to user with concurrency check.
+    Returns (True, None) on success, or (False, owner_name) if already occupied.
+    """
+    # Check if slot is already occupied by another active user
+    result = await session.execute(
+        select(User).where(
+            User.is_active.is_(True),
+            User.assigned_day == day_index,
+            User.id != user_id,
+        )
+    )
+    occupied_by = result.scalar_one_or_none()
+    if occupied_by:
+        return False, occupied_by.full_name
+
+    # Assign to current user
+    user_res = await session.execute(select(User).where(User.id == user_id))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False, None
+
+    user.assigned_day = day_index
+    user.order_index = day_index
+    session.add(user)
+    await session.commit()
+    return True, None
+
+
 async def get_or_create_rotation_state(session: AsyncSession) -> RotationState:
-    """
-    Get the current rotation anchor checkpoint or initialize it if absent.
-    Ensures mathematical continuity when active user count changes.
-    """
+    """Get the current rotation anchor checkpoint or initialize it if absent."""
     result = await session.execute(select(RotationState).order_by(RotationState.id.asc()))
     state = result.scalar_one_or_none()
     if state is None:
@@ -47,12 +91,7 @@ def calculate_rotation_index(
     anchor_date: date,
     anchor_slot: int,
 ) -> int:
-    """
-    Dinamik xavfsiz rotatsiya indeksi.
-    Anchor sana va anchor slotdan hisoblab, a'zolar soni o'zgarganda
-    navbat sakrab ketishining oldini oladi.
-    Formula: (anchor_slot + (target_date - anchor_date).days) % total_users
-    """
+    """Fallback Round-Robin index when assigned_day is not set."""
     if total_users <= 0:
         return 0
     delta_days = (target_date - anchor_date).days
@@ -64,26 +103,26 @@ async def rebalance_users(
     reference_user_for_anchor: Optional[User] = None,
 ) -> List[User]:
     """
-    Rebalance the queue for all active users so order_index is contiguous from 0 to N-1.
-    Updates RotationState anchor to date.today() to prevent queue jumps.
+    Rebalance the queue for all active users so order_index is contiguous.
+    Preserves assigned_day if set.
     """
     today = date.today()
     users = await get_active_users(session)
     n = len(users)
 
     for idx, user in enumerate(users):
-        if user.order_index != idx:
+        if user.assigned_day is not None:
+            user.order_index = user.assigned_day
+        else:
             user.order_index = idx
-            session.add(user)
+        session.add(user)
     await session.commit()
 
     if n > 0:
         rot_state = await get_or_create_rotation_state(session)
-        # Determine anchor slot for today
         if reference_user_for_anchor and reference_user_for_anchor.is_active:
             new_anchor_slot = reference_user_for_anchor.order_index
         else:
-            # If no reference or user left, keep slot within range
             new_anchor_slot = min(rot_state.anchor_slot, n - 1)
 
         rot_state.anchor_date = today
@@ -102,41 +141,32 @@ async def register_or_join(
     username: Optional[str] = None,
 ) -> Tuple[User, bool]:
     """
-    Yangi foydalanuvchini slotga qo'shish yoki avval chiqqan foydalanuvchini qayta faollashtirish.
-    Yangi a'zo navbatning oxirgi slotiga joylashtiriladi va tartib qayta muvozanatlanadi.
+    Add or reactivate user in the database without assigning slot yet.
+    Slot selection happens in the next step via inline day buttons.
     """
     result = await session.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
 
-    today = date.today()
-    duty_user_today, _ = await get_duty_for_date(session, today)
-
     if user is None:
-        active_users = await get_active_users(session)
-        new_index = len(active_users)
         user = User(
             id=user_id,
             username=username,
             full_name=full_name,
             room_number=room_number,
-            order_index=new_index,
+            order_index=0,
+            assigned_day=None,
             is_active=True,
         )
         session.add(user)
         await session.commit()
-        await rebalance_users(session, reference_user_for_anchor=duty_user_today)
         return user, True
     else:
         user.username = username
         user.full_name = full_name
         user.room_number = room_number
-        if not user.is_active:
-            user.is_active = True
-            active_users = await get_active_users(session)
-            user.order_index = len(active_users)
+        user.is_active = True
         session.add(user)
         await session.commit()
-        await rebalance_users(session, reference_user_for_anchor=duty_user_today)
         return user, False
 
 
@@ -144,11 +174,7 @@ add_or_update_user = register_or_join
 
 
 async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
-    """
-    Foydalanuvchi kvartiradan chiqqanda uni nofaol (is_active=False) qilish va
-    qolgan a'zolar navbat slotlarini uzluksiz (0 dan N-1 gacha) qayta indekslash.
-    Uzluksizlikni saqlash uchun bugungi navbatchi hisobga olinadi.
-    """
+    """Deactivate user, clear their slot, and rebalance remaining members."""
     result = await session.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
@@ -158,6 +184,7 @@ async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
     duty_user_today, _ = await get_duty_for_date(session, today)
 
     user.is_active = False
+    user.assigned_day = None
     session.add(user)
     await session.commit()
 
@@ -174,13 +201,16 @@ async def get_duty_for_date(
     target_date: date,
 ) -> Tuple[Optional[User], Optional[DutyHistory]]:
     """
-    Berilgan sana uchun kunlik mas'ul navbatchini dinamik hisoblab berish.
-    Avval DutyHistory jadvalidan tekshiradi, keyin uzluksiz Round-Robin anchoridan hisoblaydi.
+    Berilgan sana uchun kunlik mas'ul navbatchini aniqlash.
+    1. DutyHistory jadvalidan (agar swap/almashtirish bo'lgan bo'lsa) tekshiradi.
+    2. Shu haftaning kuni (0=Dushanba, ..., 6=Yakshanba) ga biriktirilgan (assigned_day) xonadoshni oladi.
+    3. Agar topilmasa, fallback rotatsiyadan foydalanadi.
     """
     active_users = await get_active_users(session)
     if not active_users:
         return None, None
 
+    # 1. Check explicit DutyHistory
     result = await session.execute(
         select(DutyHistory)
         .where(
@@ -197,6 +227,13 @@ async def get_duty_for_date(
             assigned_user = user_result.scalar_one_or_none()
         return assigned_user, duty_record
 
+    # 2. Check assigned_day matching the target date's weekday
+    target_weekday = target_date.weekday()
+    user_by_day = next((u for u in active_users if u.assigned_day == target_weekday), None)
+    if user_by_day:
+        return user_by_day, None
+
+    # 3. Fallback to rotation state
     rot_state = await get_or_create_rotation_state(session)
     slot_index = calculate_rotation_index(
         target_date=target_date,
@@ -211,51 +248,146 @@ async def get_duty_for_date(
 get_daily_duty = get_duty_for_date
 
 
+# =====================================================================
+# Kunlik 5 talik Vazifalar Boshqaruvi
+# =====================================================================
+
+async def get_or_create_daily_tasks(
+    session: AsyncSession,
+    duty_date: date,
+) -> List[DailyTaskState]:
+    """Retrieve or initialize the 5 daily tasks for given date."""
+    result = await session.execute(
+        select(DailyTaskState)
+        .options(selectinload(DailyTaskState.completed_by_user))
+        .where(DailyTaskState.duty_date == duty_date)
+        .order_by(DailyTaskState.id.asc())
+    )
+    existing_tasks = list(result.scalars().all())
+    existing_keys = {t.task_key for t in existing_tasks}
+
+    created_any = False
+    for task_key in DAILY_5_TASKS.keys():
+        if task_key not in existing_keys:
+            new_task = DailyTaskState(
+                duty_date=duty_date,
+                task_key=task_key,
+                is_done=False,
+                completed_by=None,
+            )
+            session.add(new_task)
+            created_any = True
+
+    if created_any:
+        await session.commit()
+        result = await session.execute(
+            select(DailyTaskState)
+            .options(selectinload(DailyTaskState.completed_by_user))
+            .where(DailyTaskState.duty_date == duty_date)
+            .order_by(DailyTaskState.id.asc())
+        )
+        existing_tasks = list(result.scalars().all())
+
+    task_order = list(DAILY_5_TASKS.keys())
+    existing_tasks.sort(key=lambda item: task_order.index(item.task_key) if item.task_key in task_order else 999)
+    return existing_tasks
+
+
+async def toggle_daily_task(
+    session: AsyncSession,
+    duty_date: date,
+    task_key: str,
+    user_id: int,
+) -> Tuple[Optional[DailyTaskState], bool, bool, int]:
+    """
+    Toggle one of the 5 daily tasks.
+    If all 5 tasks become done, marks DutyHistory as COMPLETED.
+    Returns (task_item, new_status, is_all_completed, completed_count).
+    """
+    tasks = await get_or_create_daily_tasks(session, duty_date)
+    task_item = next((t for t in tasks if t.task_key == task_key), None)
+
+    if not task_item:
+        return None, False, False, 0
+
+    if task_item.is_done:
+        task_item.is_done = False
+        task_item.completed_by = None
+        new_status = False
+    else:
+        task_item.is_done = True
+        task_item.completed_by = user_id
+        new_status = True
+
+    session.add(task_item)
+    await session.commit()
+
+    # Re-check all 5 tasks
+    tasks = await get_or_create_daily_tasks(session, duty_date)
+    completed_count = sum(1 for t in tasks if t.is_done)
+    is_all_completed = (completed_count == len(DAILY_5_TASKS))
+
+    # Update DutyHistory accordingly
+    res = await session.execute(
+        select(DutyHistory).where(
+            DutyHistory.duty_date == duty_date,
+            DutyHistory.duty_type == DutyType.DAILY,
+        )
+    )
+    duty_record = res.scalar_one_or_none()
+
+    if is_all_completed:
+        if duty_record:
+            duty_record.status = DutyStatus.COMPLETED
+            duty_record.user_id = user_id
+        else:
+            duty_record = DutyHistory(
+                user_id=user_id,
+                duty_type=DutyType.DAILY,
+                duty_date=duty_date,
+                status=DutyStatus.COMPLETED,
+            )
+            session.add(duty_record)
+        await session.commit()
+    else:
+        if duty_record and duty_record.status == DutyStatus.COMPLETED:
+            duty_record.status = DutyStatus.PENDING
+            session.add(duty_record)
+            await session.commit()
+
+    return task_item, new_status, is_all_completed, completed_count
+
+
+async def are_all_daily_tasks_done(session: AsyncSession, duty_date: date) -> bool:
+    """Check if all 5 daily tasks are completed."""
+    tasks = await get_or_create_daily_tasks(session, duty_date)
+    return all(t.is_done for t in tasks) and len(tasks) == len(DAILY_5_TASKS)
+
+
 async def get_laundry_duty_for_date(
     session: AsyncSession,
     target_date: date,
 ) -> Optional[User]:
-    """
-    Bugungi kir yuvish mashinasidan foydalanish huquqiga ega a'zoni hisoblash.
-    Kunlik navbatchi bir vaqtda kir yuvishga zo'riqmasligi uchun offset qo'llanadi.
-    """
+    """Bugungi kir yuvish mashinasidan foydalanish huquqiga ega xonadosh."""
     active_users = await get_active_users(session)
     if not active_users:
         return None
 
-    # Check if there is an explicit DutyHistory entry for LAUNDRY
-    res = await session.execute(
-        select(DutyHistory).where(
-            DutyHistory.duty_date == target_date,
-            DutyHistory.duty_type == DutyType.LAUNDRY,
-        )
-    )
-    rec = res.scalar_one_or_none()
-    if rec:
-        user = next((u for u in active_users if u.id == rec.user_id), None)
-        if user:
-            return user
+    duty_user, _ = await get_duty_for_date(session, target_date)
+    # Fair offset: len // 2 to separate laundry from kitchen duty
+    if duty_user and len(active_users) > 1:
+        duty_idx = active_users.index(duty_user) if duty_user in active_users else 0
+        laundry_idx = (duty_idx + max(1, len(active_users) // 2)) % len(active_users)
+        return active_users[laundry_idx]
 
-    rot_state = await get_or_create_rotation_state(session)
-    duty_slot = calculate_rotation_index(
-        target_date=target_date,
-        total_users=len(active_users),
-        anchor_date=rot_state.anchor_date,
-        anchor_slot=rot_state.anchor_slot,
-    )
-    # Fair offset: len // 2 to separate laundry from daily kitchen chore
-    laundry_slot = (duty_slot + max(1, len(active_users) // 2)) % len(active_users)
-    return active_users[laundry_slot]
+    return active_users[0]
 
 
 async def get_weekly_schedule(
     session: AsyncSession,
     start_date: Optional[date] = None,
 ) -> List[dict]:
-    """
-    Get 7-day schedule starting from start_date (defaults to current week's Monday).
-    Includes both daily kitchen duty and laundry turn.
-    """
+    """Get 7-day schedule with duty holders and laundry turns."""
     if start_date is None:
         today = date.today()
         start_date = today - timedelta(days=today.weekday())
@@ -293,10 +425,7 @@ async def get_weekend_grocery_duty(
     session: AsyncSession,
     target_date: date,
 ) -> Tuple[Optional[User], Optional[User]]:
-    """
-    Calculate shopping pair (bozorlik juftligi) for the weekend.
-    Pairs rotate cyclically based on the week number.
-    """
+    """Weekend grocery shopping pair."""
     active_users = await get_active_users(session)
     n = len(active_users)
     if n == 0:
@@ -315,17 +444,11 @@ async def get_weekend_grocery_duty(
 
 
 async def get_water_duty_schedule(session: AsyncSession) -> Dict:
-    """
-    1-xona va 2-xona bo'yicha 2 haftalik suv olib kelish navbatini aniq hisoblash.
-    - Qaysi xona navbatdaligi
-    - Xona ichidagi mas'ul a'zo
-    - 2 haftalik reja (joriy hafta va keyingi hafta)
-    """
+    """1-xona va 2-xona bo'yicha 2 haftalik suv olib kelish navbatini hisoblash."""
     active_users = await get_active_users(session)
     room1_users = [u for u in active_users if u.room_number == 1]
     room2_users = [u for u in active_users if u.room_number == 2]
 
-    # Count completed water duties to determine alternating round
     result = await session.execute(
         select(func.count(DutyHistory.id)).where(
             DutyHistory.duty_type == DutyType.WATER,
@@ -334,14 +457,8 @@ async def get_water_duty_schedule(session: AsyncSession) -> Dict:
     )
     total_completed = result.scalar_one() or 0
 
-    # Determine current room (alternate between Room 1 and Room 2)
-    # Even count -> Room 1, Odd count -> Room 2 (or based on initial priority)
     current_room = 1 if (total_completed % 2 == 0) else 2
     next_room = 2 if current_room == 1 else 1
-
-    # Responsible member within current room
-    r1_count = total_completed // 2 + (1 if total_completed % 2 == 1 and current_room == 2 else 0)
-    r2_count = total_completed // 2
 
     current_user = None
     if current_room == 1 and room1_users:
@@ -351,7 +468,6 @@ async def get_water_duty_schedule(session: AsyncSession) -> Dict:
     elif active_users:
         current_user = active_users[total_completed % len(active_users)]
 
-    # Next week user
     next_user = None
     if next_room == 1 and room1_users:
         next_user = room1_users[((total_completed + 1) // 2) % len(room1_users)]
@@ -429,10 +545,7 @@ async def execute_duty_swap(
     user_b_id: int,
     date_b: date,
 ) -> bool:
-    """
-    Swap duties between User A (on date_a) and User B (on date_b).
-    Creates or updates DutyHistory records for both dates.
-    """
+    """Swap duties between User A and User B on their respective dates."""
     res_a = await session.execute(
         select(DutyHistory).where(
             DutyHistory.duty_date == date_a,
@@ -479,12 +592,17 @@ async def apply_missed_duty_fine(
     session: AsyncSession,
     duty_date: date,
 ) -> Optional[PenaltyFund]:
-    """If today's duty is not marked COMPLETED at end of day, record fine in PenaltyFund."""
+    """
+    Check if all 5 daily tasks were completed.
+    If not, record 15,000 UZS penalty in PenaltyFund.
+    """
     user, duty_record = await get_duty_for_date(session, duty_date)
     if not user:
         return None
 
-    if duty_record and duty_record.status == DutyStatus.COMPLETED:
+    # Check 5 tasks completion
+    all_done = await are_all_daily_tasks_done(session, duty_date)
+    if all_done:
         return None
 
     existing_fine = await session.execute(
@@ -510,7 +628,7 @@ async def apply_missed_duty_fine(
     fine = PenaltyFund(
         user_id=user.id,
         amount=settings.DAILY_FINE_AMOUNT,
-        reason=f"Kunlik navbatchilik bajarilmadi ({duty_date})",
+        reason=f"Kunlik 5 ta vazifa to'liq bajarilmadi ({duty_date})",
         is_paid=False,
     )
     session.add(fine)

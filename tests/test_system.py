@@ -43,18 +43,13 @@ async def run_tests():
     print("MISSION 3-BOSQICH: SPLIT-BILL, MEHMON, FOND VA DOKER TIZIMLARI TESTI")
     print("=" * 70)
 
-    # Clean existing test DB
-    await engine.dispose()
-    db_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "kvartira.db"))
-    if os.path.exists(db_file):
-        try:
-            os.remove(db_file)
-        except Exception:
-            pass
+    from database.base import Base
 
-    # 1. Initialize DB with all tables (Users, Expenses, ExpenseShare, PenaltyFund, etc.)
+    # 1. Reset DB tables cleanly
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
     await init_db()
-    print(" [PASS] 1. Ma'lumotlar bazasi va yangi Expense, ExpenseShare jadvallari yaratildi.")
+    print(" [PASS] 1. Ma'lumotlar bazasi toza holatda yaratildi va barcha jadvallar faollashtirildi.")
 
     async with get_session() as session:
         # 2. Add 8 initial apartment residents
@@ -143,17 +138,64 @@ async def run_tests():
         assert water_sched["current_user"] is not None
         print(" [PASS] 9. 1-Xona va 2-Xona bo'yicha 2 haftalik suv navbati tekshirildi.")
 
-        # 9. Test Duty Swap
-        tomorrow = today + timedelta(days=1)
-        u1, _ = await get_duty_for_date(session, today)
-        u2, _ = await get_duty_for_date(session, tomorrow)
-        swap_res = await execute_duty_swap(session, u1.id, today, u2.id, tomorrow)
-        assert swap_res is True
-        print(" [PASS] 10. Navbatchilikni o'zaro almashtirish (Swap) tekshirildi.")
+        # 10. Test Self-Service Slot Selection & Concurrency Locking
+        from services.duty_service import (
+            assign_user_slot,
+            get_occupied_slots_map,
+            get_or_create_daily_tasks,
+            toggle_daily_task,
+            are_all_daily_tasks_done,
+        )
+
+        # User 101 chooses slot 0 (Dushanba)
+        success_1, occ_name_1 = await assign_user_slot(session, user_id=101, day_index=0)
+        assert success_1 is True
+        assert occ_name_1 is None
+
+        # User 102 tries to choose slot 0 (Dushanba) -> Concurrency locking must block!
+        success_2, occ_name_2 = await assign_user_slot(session, user_id=102, day_index=0)
+        assert success_2 is False
+        assert occ_name_2 == "Asadbek Karimov"
+
+        # User 102 chooses slot 1 (Seshanba) -> Success
+        success_3, occ_name_3 = await assign_user_slot(session, user_id=102, day_index=1)
+        assert success_3 is True
+        assert occ_name_3 is None
+
+        occupied_map = await get_occupied_slots_map(session)
+        assert 0 in occupied_map and occupied_map[0].id == 101
+        assert 1 in occupied_map and occupied_map[1].id == 102
+        print(" [PASS] 10. Self-Service Slot Selection & Concurrency Locking (Bandlik nazorati) muvaffaqiyatli tekshirildi.")
+
+        # 11. Test 5-Item Daily Tasks Checklist
+        test_duty_date = date.today()
+        # Initialize 5 tasks
+        daily_tasks = await get_or_create_daily_tasks(session, test_duty_date)
+        assert len(daily_tasks) == 5
+        assert all(t.is_done is False for t in daily_tasks)
+
+        # Toggle first task (task_meal)
+        t_item, t_stat, t_all, t_cnt = await toggle_daily_task(session, test_duty_date, "task_meal", 101)
+        assert t_stat is True
+        assert t_cnt == 1
+        assert t_all is False
+
+        # Toggle remaining 4 tasks
+        for k in ["task_bread", "task_table", "task_dishes", "task_trash"]:
+            _, _, t_all, t_cnt = await toggle_daily_task(session, test_duty_date, k, 101)
+
+        assert t_cnt == 5
+        assert t_all is True
+        assert await are_all_daily_tasks_done(session, test_duty_date) is True
+
+        # When all 5 are done, duty record must be COMPLETED and no fine applied
+        fine_res = await apply_missed_duty_fine(session, test_duty_date)
+        assert fine_res is None
+        print(" [PASS] 12. 5 talik Kunlik Checklist, avtomatik COMPLETED va jarima nazorati muvaffaqiyatli tekshirildi.")
 
     await engine.dispose()
     print("=" * 70)
-    print("BARCHA 10 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
+    print("BARCHA 12 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
     print("=" * 70)
 
 

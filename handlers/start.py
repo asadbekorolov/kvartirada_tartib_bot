@@ -9,11 +9,18 @@ from sqlalchemy import select
 from config import settings
 from database.models import PenaltyFund, User
 from database.session import get_session
-from keyboards.inline import get_leave_confirm_keyboard, get_room_selection_keyboard
+from keyboards.inline import (
+    SLOT_NAMES,
+    get_day_slots_keyboard,
+    get_leave_confirm_keyboard,
+    get_room_selection_keyboard,
+)
 from keyboards.reply import get_main_menu_keyboard
 from services.duty_service import (
+    assign_user_slot,
     get_active_users,
     get_duty_for_date,
+    get_occupied_slots_map,
     leave_and_rebalance,
     register_or_join,
 )
@@ -24,17 +31,18 @@ router = Router(name="start_router")
 class RegistrationState(StatesGroup):
     waiting_for_name = State()
     waiting_for_room = State()
+    waiting_for_slot = State()
 
 
 APARTMENT_RULES_SUMMARY = (
     "📜 <b>Kvartiramizning Asosiy Tartib Qoidalari:</b>\n\n"
     "1️⃣ <b>Kunlik Navbatchilik:</b> Har kuni 1 kishi navbatchi bo'ladi. "
-    "5 ta asosiy vazifa: ovqat, non/dasturxon, xontaxta, umumiy idishlar/qozon, oshxona va hojatxona axlatini to'kish.\n"
+    "5 ta asosiy vazifa (ovqat, non, xontaxta, idishlar, axlat) to'liq bajarilishi shart.\n"
     "2️⃣ <b>Kechki Sukunat Rejimi:</b> Soat <b>22:30</b> dan boshlab xonalarda shovqin qilmaslik, "
-    "telefon suhbatlarini balkonda o'tkazish, video va musiqalarni faqat quloqchinda ko'rish shart.\n"
-    "3️⃣ <b>Kir Yuvish Tartibi:</b> Har kuni belgilangan navbatdagi xonadosh kir yuvish mashinasidan foydalanish huquqiga ega.\n"
-    "4️⃣ <b>Suv Navbati:</b> 1-xona va 2-xona navbatma-navbat 19L toza ichimlik suvi ta'minotiga mas'ul.\n"
-    "5️⃣ <b>Dam Olish Kuni:</b> Shanba/Yakshanba kunlari bozorlik juftligi xarid qiladi va barcha xonadoshlar 11 bandlik tozalash checklistini bajaradi."
+    "qo'ng'iroqlarni balkonda amalga oshirish, video/musiqani faqat quloqchinda ko'rish shart.\n"
+    "3️⃣ <b>Kir Yuvish Tartibi:</b> Har kuni belgilangan navbatdagi xonadosh kir mashinasidan foydalanadi.\n"
+    "4️⃣ <b>Suv Navbati:</b> 1-xona va 2-xona navbatma-navbat 19L toza ichimlik suvi olib keladi.\n"
+    "5️⃣ <b>Bozorlik va Tozalash:</b> Shanba kuni bozorlik juftligi xarid qiladi va 11 bandlik tozalash checklisti bajariladi."
 )
 
 
@@ -55,23 +63,25 @@ async def handle_start(message: Message, state: FSMContext):
                 else "🧹 <i>Navbatchi topilmadi</i>"
             )
 
+            day_text = SLOT_NAMES.get(user.assigned_day, "Belgilanmagan")
+
             await message.answer(
                 f"👋 Assalomu alaykum, <b>{user.full_name}</b>!\n"
                 f"🏠 Kvartira: <b>{settings.APARTMENT_NAME}</b>\n"
                 f"🏢 Xonangiz: <b>{user.room_number}-Xona</b>\n"
-                f"🔢 Navbat tartib raqamingiz (index): <b>{user.order_index}</b> (Slot: #{user.order_index + 1})\n\n"
+                f"📅 Belgilangan navbatchilik kuningiz: <b>{day_text}</b>\n\n"
                 f"{duty_info}\n\n"
                 f"Quyidagi menyu orqali kerakli bo'limni tanlang:",
                 reply_markup=get_main_menu_keyboard(),
             )
             return
 
-    # User is not registered or currently inactive
+    # Start registration process
     await state.clear()
     await state.set_state(RegistrationState.waiting_for_name)
     await message.answer(
         f"Assalomu alaykum! 🏠 <b>{settings.APARTMENT_NAME}</b> tartib va navbatchilik botiga xush kelibsiz.\n\n"
-        f"Kvartiraning dinamik navbatchilik tizimiga qo'shilish uchun, iltimos, "
+        f"Kvartiraning navbatchilik tizimiga qo'shilish uchun, iltimos, "
         f"<b>To'liq ism-familiyangizni</b> kiriting (Masalan: <i>Ali Valiyev</i>):"
     )
 
@@ -95,7 +105,7 @@ async def process_name(message: Message, state: FSMContext):
 
 @router.callback_query(RegistrationState.waiting_for_room, F.data.startswith("room_select:"))
 async def process_room(callback: CallbackQuery, state: FSMContext):
-    """Step 2: Save room, assign slot index, rebalance, and display rules summary."""
+    """Step 2: Save room, register in DB, and prompt for day slot selection."""
     room_number = int(callback.data.split(":")[1])
     data = await state.get_data()
     full_name = data.get("full_name")
@@ -109,19 +119,114 @@ async def process_room(callback: CallbackQuery, state: FSMContext):
             room_number=room_number,
             username=username,
         )
-        active_users = await get_active_users(session)
-        total = len(active_users)
+        occupied_map = await get_occupied_slots_map(session)
 
-    await state.clear()
+    await state.set_state(RegistrationState.waiting_for_slot)
     await callback.message.delete()
 
     await callback.message.answer(
-        f"🎉 <b>Tabriklaymiz, {user.full_name}! Siz muvaffaqiyatli ro'yxatdan o'tdingiz.</b>\n\n"
-        f"🏢 Xona: <b>{user.room_number}-Xona</b>\n"
-        f"🔢 Navbat tartib raqamingiz: <b>{user.order_index}</b> (Jami a'zolar: {total} ta)\n\n"
+        f"Xonangiz: <b>{room_number}-Xona</b> deb saqlandi.\n\n"
+        f"📅 <b>Haftalik navbatchilik kuningizni tanlang:</b>\n"
+        f"<i>(Yashil 🟢 — bo'sh kunlar, Qulf 🔒 — boshqa xonadoshlar band qilgan kunlar)</i>",
+        reply_markup=get_day_slots_keyboard(occupied_map),
+    )
+
+
+@router.callback_query(RegistrationState.waiting_for_slot, F.data.startswith("slot_occ:"))
+@router.callback_query(F.data.startswith("slot_occ:"))
+async def process_occupied_slot_click(callback: CallbackQuery):
+    """Alert user that this day is already taken by someone else."""
+    day_idx = int(callback.data.split(":")[1])
+    async with get_session() as session:
+        occupied_map = await get_occupied_slots_map(session)
+
+    owner = occupied_map.get(day_idx)
+    owner_name = owner.full_name if owner else "boshqa xonadosh"
+    day_title = SLOT_NAMES.get(day_idx, "Ushbu kun")
+
+    await callback.answer(
+        f"⚠️ {day_title} allaqachon {owner_name} tomonidan band qilingan! Iltimos, bo'sh kunlardan birini tanlang.",
+        show_alert=True,
+    )
+
+
+@router.callback_query(RegistrationState.waiting_for_slot, F.data.startswith("slot_sel:"))
+@router.callback_query(F.data.startswith("slot_sel:"))
+async def process_slot_selection(callback: CallbackQuery, state: FSMContext):
+    """Assign selected day to user with concurrency check."""
+    day_idx = int(callback.data.split(":")[1])
+    user_id = callback.from_user.id
+
+    async with get_session() as session:
+        success, occupied_name = await assign_user_slot(session, user_id, day_idx)
+        user_res = await session.execute(select(User).where(User.id == user_id))
+        user = user_res.scalar_one_or_none()
+        occupied_map = await get_occupied_slots_map(session)
+
+    day_title = SLOT_NAMES.get(day_idx, "Tanlangan kun")
+
+    if not success:
+        await callback.answer(
+            f"⚠️ Kechirasiz, {day_title} hozirgina {occupied_name} tomonidan band qilindi! Boshqa bo'sh kunni tanlang.",
+            show_alert=True,
+        )
+        try:
+            await callback.message.edit_reply_markup(reply_markup=get_day_slots_keyboard(occupied_map))
+        except Exception:
+            pass
+        return
+
+    await state.clear()
+    await callback.answer("✅ Kun muvaffaqiyatli band qilindi!", show_alert=False)
+    await callback.message.delete()
+
+    user_name = user.full_name if user else callback.from_user.full_name
+    room_num = user.room_number if user else 1
+
+    confirm_msg = (
+        f"🎉 <b>Tabriklaymiz, {user_name}!</b>\n\n"
+        f"✅ <b>Siz {day_title} kuniga navbatchi qilib belgilandingiz!</b>\n"
+        f"🏢 Xona: <b>{room_num}-Xona</b>\n\n"
         f"{APARTMENT_RULES_SUMMARY}\n\n"
-        f"<i>Barcha buyruqlardan foydalanish uchun pastdagi menyu tugmalaridan foydalanishingiz mumkin.</i>",
-        reply_markup=get_main_menu_keyboard(),
+        f"<i>Quyidagi menyu orqali botdan foydalanishingiz mumkin:</i>"
+    )
+
+    await callback.message.answer(confirm_msg, reply_markup=get_main_menu_keyboard())
+
+    # Broadcast notification to group chat
+    if settings.GROUP_CHAT_ID:
+        try:
+            await callback.bot.send_message(
+                chat_id=settings.GROUP_CHAT_ID,
+                text=(
+                    f"📢 <b>Yangi navbatchi biriktirildi!</b>\n\n"
+                    f"👤 <b>{user_name}</b> ({room_num}-Xona)\n"
+                    f"📅 Navbatchilik kuni: <b>{day_title}</b>"
+                ),
+            )
+        except Exception:
+            pass
+
+
+@router.message(Command("kun"))
+async def handle_change_day_slot(message: Message, state: FSMContext):
+    """Allow active roommate to choose or change their duty day slot."""
+    user_id = message.from_user.id
+    async with get_session() as session:
+        user_res = await session.execute(select(User).where(User.id == user_id, User.is_active.is_(True)))
+        user = user_res.scalar_one_or_none()
+        if not user:
+            await message.answer("Siz faol xonadoshlar ro'yxatida emassiz. /start orqali ro'yxatdan o'ting.")
+            return
+
+        occupied_map = await get_occupied_slots_map(session)
+
+    await state.set_state(RegistrationState.waiting_for_slot)
+    await message.answer(
+        f"📅 <b>Haftalik navbatchilik kuningizni tanlang:</b>\n"
+        f"<i>Hozirgi kuningiz: {SLOT_NAMES.get(user.assigned_day, 'Belgilanmagan')}</i>\n\n"
+        f"(Yashil 🟢 — bo'sh kunlar, Qulf 🔒 — band kunlar)",
+        reply_markup=get_day_slots_keyboard(occupied_map),
     )
 
 
@@ -140,25 +245,26 @@ async def handle_leave_command(message: Message):
     await message.answer(
         f"⚠️ <b>Diqqat, {user.full_name}!</b>\n\n"
         f"Rostdan ham kvartira safidan chiqmoqchimisiz?\n\n"
-        f"Chiqib ketsangiz, qolgan barcha a'zolarning navbat slotlari "
-        f"avtomatik uzluksiz qayta muvozanatlanadi (rebalance qilinadi).",
+        f"Chiqib ketsangiz, sizning navbatchilik kuningiz bo'shatiladi "
+        f"va boshqa a'zolar uchun ochiladi.",
         reply_markup=get_leave_confirm_keyboard(),
     )
 
 
 @router.callback_query(F.data == "confirm_leave")
 async def process_confirm_leave(callback: CallbackQuery):
-    """Deactivate user, rebalance remaining members and announce to group."""
+    """Deactivate user, free their slot, and announce to group."""
     user_id = callback.from_user.id
     async with get_session() as session:
         user_res = await session.execute(select(User).where(User.id == user_id))
         user = user_res.scalar_one_or_none()
+        day_name = SLOT_NAMES.get(user.assigned_day, "Navbat") if user else "Navbat"
         success = await leave_and_rebalance(session, user_id)
         active_users = await get_active_users(session)
 
     await callback.message.edit_text(
         f"✅ <b>Siz kvartira a'zoligidan chiqarildingiz.</b>\n\n"
-        f"Qolgan {len(active_users)} ta xonadosh uchun navbatlar uzluksiz qayta indekslandi.\n"
+        f"Sizning <b>{day_name}</b> kuningiz bo'shatildi.\n"
         f"Kelgusida qaytmoqchi bo'lsangiz, /start orqali qayta qo'shilishingiz mumkin."
     )
 
@@ -169,7 +275,7 @@ async def process_confirm_leave(callback: CallbackQuery):
                 text=(
                     f"📢 <b>Kvartira tarkibi yangilandi!</b>\n\n"
                     f"<b>{user.full_name}</b> kvartirani tark etdi.\n"
-                    f"Qolgan {len(active_users)} kishi uchun navbatchilik zanjiri uzluksiz qayta muvozanatlandi!"
+                    f"Uning <b>{day_name}</b> navbatchilik kuni bo'shadi!"
                 ),
             )
         except Exception:
@@ -186,8 +292,9 @@ async def process_cancel_leave(callback: CallbackQuery):
 @router.message(Command("azolar"))
 @router.message(Command("members"))
 async def handle_members(message: Message):
-    """Display active roommates, their room, and order_index (0 to N-1)."""
+    """Display active roommates and their assigned duty days (Monday to Sunday + Reserve)."""
     async with get_session() as session:
+        occupied_map = await get_occupied_slots_map(session)
         active_users = await get_active_users(session)
 
     if not active_users:
@@ -195,15 +302,21 @@ async def handle_members(message: Message):
         return
 
     text_lines = [
-        f"👥 <b>{settings.APARTMENT_NAME} faol xonadoshlari ({len(active_users)} kishi):</b>\n",
+        f"👥 <b>{settings.APARTMENT_NAME} faol xonadoshlari va kunlik navbat taqsimoti:</b>\n",
     ]
-    for user in active_users:
-        username_part = f" (@{user.username})" if user.username else ""
-        text_lines.append(
-            f"<b>Tartib: {user.order_index}</b> (Slot #{user.order_index + 1}) • {user.full_name}{username_part} — 🏢 <i>{user.room_number}-Xona</i>"
-        )
 
-    text_lines.append("\n<i>Tartib raqamlari (0 dan N-1 gacha) Round-Robin navbat zanjirini belgilaydi.</i>")
+    for day_idx in range(8):
+        day_title = SLOT_NAMES[day_idx]
+        user = occupied_map.get(day_idx)
+        if user:
+            username_part = f" (@{user.username})" if user.username else ""
+            text_lines.append(
+                f"📅 <b>{day_title}:</b> <b>{user.full_name}</b>{username_part} — 🏢 <i>{user.room_number}-Xona</i>"
+            )
+        else:
+            text_lines.append(f"📅 <b>{day_title}:</b> <i>🟢 Bo'sh (hali tanlanmagan)</i>")
+
+    text_lines.append("\n<i>O'z kuningizni tanlash yoki o'zgartirish uchun: /kun buyrug'idan foydalaning.</i>")
     await message.answer("\n".join(text_lines))
 
 
@@ -219,7 +332,6 @@ async def handle_profile(message: Message):
             await message.answer("Siz tizimda faol a'zo emassiz. /start orqali ro'yxatdan o'ting.")
             return
 
-        active_users = await get_active_users(session)
         penalties_res = await session.execute(
             select(PenaltyFund).where(PenaltyFund.user_id == user_id, PenaltyFund.is_paid.is_(False))
         )
@@ -232,14 +344,16 @@ async def handle_profile(message: Message):
         else "✅ Jarimalar mavjud emas"
     )
 
+    day_str = SLOT_NAMES.get(user.assigned_day, "Tanlanmagan (/kun orqali tanlang)")
+
     await message.answer(
         f"👤 <b>Kvartirant Profili:</b>\n\n"
         f"Ism-familiya: <b>{user.full_name}</b>\n"
         f"Telegram ID: <code>{user.id}</code>\n"
         f"Xona: <b>{user.room_number}-Xona</b>\n"
-        f"Navbat tartib raqami: <b>{user.order_index}</b> (Slot: #{user.order_index + 1} / {len(active_users)})\n"
+        f"Navbatchilik kuni: <b>{day_str}</b>\n"
         f"Holat: <b>Faol xonadosh</b>\n\n"
         f"💰 <b>Jarima jamg'armasi holati:</b>\n"
         f"{debt_info}\n\n"
-        f"<i>Kvartiradan chiqmoqchi bo'lsangiz: /leave buyrug'idan foydalaning.</i>"
+        f"<i>Kuningizni o'zgartirish: /kun | Chiqish: /leave</i>"
     )

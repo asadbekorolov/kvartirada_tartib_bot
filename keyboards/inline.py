@@ -1,9 +1,28 @@
 from datetime import date
-from typing import List
+from typing import Dict, List, Optional
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from database.models import CleaningChecklistState, User
+from database.models import CleaningChecklistState, DailyTaskState, User
 from services.cleaning_service import CLEANING_TASKS
+
+SLOT_NAMES = {
+    0: "Dushanba",
+    1: "Seshanba",
+    2: "Chorshanba",
+    3: "Payshanba",
+    4: "Juma",
+    5: "Shanba",
+    6: "Yakshanba",
+    7: "Zaxira / Yordamchi slot",
+}
+
+DAILY_5_TASKS = {
+    "task_meal": "🍲 Kechki taom / ovqat",
+    "task_bread": "🍞 Non olib kelish",
+    "task_table": "🧽 Xontaxta va stollarni artish",
+    "task_dishes": "🍳 Qozon va umumiy idishlar",
+    "task_trash": "🗑 Oshxona va hojatxona axlati",
+}
 
 
 def get_room_selection_keyboard() -> InlineKeyboardMarkup:
@@ -17,34 +36,70 @@ def get_room_selection_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def get_duty_complete_keyboard(duty_date: date) -> InlineKeyboardMarkup:
-    """Inline button to mark daily duty as completed."""
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                text="✅ Navbatchilikni bajardim",
-                callback_data=f"duty_complete:{duty_date.isoformat()}",
-            )
-        ]
-    ]
+def get_day_slots_keyboard(occupied_map: Dict[int, User]) -> InlineKeyboardMarkup:
+    """
+    Haftaning 7 kuni + 1 ta zaxira sloti klaviaturasi.
+    Agar bo'sh bo'lsa: [ 🟢 Dushanba ]
+    Agar band bo'lsa: [ 🔒 Dushanba (Ism) ]
+    """
+    keyboard = []
+    for day_idx in range(8):
+        day_title = SLOT_NAMES[day_idx]
+        if day_idx in occupied_map:
+            user = occupied_map[day_idx]
+            first_name = user.full_name.split()[0]
+            text = f"🔒 {day_title} ({first_name})"
+            cb = f"slot_occ:{day_idx}"
+        else:
+            text = f"🟢 {day_title}"
+            cb = f"slot_sel:{day_idx}"
+
+        keyboard.append([InlineKeyboardButton(text=text, callback_data=cb)])
+
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_daily_tasks_keyboard(
+    tasks: List[DailyTaskState],
+    duty_date: date,
+) -> InlineKeyboardMarkup:
+    """
+    Kunlik navbatchi uchun 5 ta alohida vazifa tugmasi.
+    Bajarilmagan bo'lsa: [❌] 🍲 Kechki taom / ovqat
+    Bajarilgan bo'lsa:   [✅] 🍲 Kechki taom / ovqat
+    """
+    buttons = []
+    task_dict = {t.task_key: t for t in tasks}
+
+    for key, label in DAILY_5_TASKS.items():
+        task_item = task_dict.get(key)
+        is_done = task_item.is_done if task_item else False
+        status_icon = "✅" if is_done else "❌"
+        btn_text = f"[{status_icon}] {label}"
+        cb = f"dtask_tog:{key}:{duty_date.isoformat()}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb)])
+
+    # Refresh row
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔄 Yangilash",
+            callback_data=f"dtask_ref:{duty_date.isoformat()}",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_checklist_inline_keyboard(
     items: List[CleaningChecklistState],
     week_date: date,
 ) -> InlineKeyboardMarkup:
-    """
-    11 bandlik interaktiv tozalash checklist klaviaturasi.
-    Har bir band bosilganda [❌] holatidan [✅] holatiga o'tadi.
-    """
+    """11 bandlik interaktiv dam olish kuni tozalash checklist klaviaturasi."""
     buttons = []
     for idx, item in enumerate(items, 1):
         title = CLEANING_TASKS.get(item.task_key, item.task_key)
 
         if item.is_done:
             by_name = item.completed_by_user.full_name.split()[0] if item.completed_by_user else "Bajarildi"
-            # Truncate title if needed
             short_title = title if len(title) <= 26 else title[:24] + ".."
             btn_text = f"✅ {idx}. {short_title} ({by_name})"
         else:
@@ -54,14 +109,12 @@ def get_checklist_inline_keyboard(
         cb_data = f"clean_tog:{item.task_key}:{week_date.isoformat()}"
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
 
-    # Control row
     buttons.append([
         InlineKeyboardButton(
             text="🔄 Yangilash",
             callback_data=f"clean_ref:{week_date.isoformat()}",
         )
     ])
-
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -69,7 +122,7 @@ def get_swap_candidates_keyboard(
     candidates: List[User],
     requester_date: date,
 ) -> InlineKeyboardMarkup:
-    """List active flatmates to choose from when requesting a swap."""
+    """List active roommates to choose from for duty swap."""
     keyboard = []
     for candidate in candidates:
         text = f"👤 {candidate.full_name} ({candidate.room_number}-Xona)"
@@ -85,7 +138,7 @@ def get_swap_request_keyboard(
     requester_date_str: str,
     target_date_str: str,
 ) -> InlineKeyboardMarkup:
-    """Buttons sent to target user to accept or reject a duty swap."""
+    """Buttons sent to target user to accept or reject swap."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -102,7 +155,7 @@ def get_swap_request_keyboard(
 
 
 def get_leave_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Confirmation buttons for /leave command ([Ha, chiqaman], [Bekor qilish])."""
+    """Confirmation buttons for /leave command."""
     keyboard = [
         [
             InlineKeyboardButton(text="Ha, chiqaman", callback_data="confirm_leave"),
@@ -113,7 +166,7 @@ def get_leave_confirm_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_water_complete_keyboard() -> InlineKeyboardMarkup:
-    """Button to record water bottle replenishment."""
+    """Button to record water replenishment."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -126,7 +179,7 @@ def get_water_complete_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_expense_inline_keyboard(expense_id: int) -> InlineKeyboardMarkup:
-    """Buttons for split-bill expense payment confirmation."""
+    """Buttons for split-bill payment confirmation."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -143,7 +196,7 @@ def get_expense_inline_keyboard(expense_id: int) -> InlineKeyboardMarkup:
 
 
 def get_fine_payment_keyboard(penalty_id: int) -> InlineKeyboardMarkup:
-    """Button for admin to mark fine as paid."""
+    """Button to mark penalty as settled."""
     keyboard = [
         [
             InlineKeyboardButton(
