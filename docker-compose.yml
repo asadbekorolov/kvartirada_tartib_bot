@@ -1,0 +1,23 @@
+services:
+  kvartira_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kvartira_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///app/data/kvartira.db
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - kvartira_data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  kvartira_data:
+    driver: local

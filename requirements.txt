@@ -1,0 +1,7 @@
+aiogram>=3.17.0
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+apscheduler>=3.10.4,<4.0.0
+pydantic-settings>=2.7.0
+pydantic>=2.10.0
+python-dotenv>=1.0.0
