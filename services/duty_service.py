@@ -175,7 +175,7 @@ add_or_update_user = register_or_join
 
 
 async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
-    """Deactivate user, clear their slot, and rebalance remaining members."""
+    """Pause duty / leave duty rotation, clear their slot, and rebalance remaining members."""
     result = await session.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
@@ -184,7 +184,7 @@ async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
     today = date.today()
     duty_user_today, _ = await get_duty_for_date(session, today)
 
-    user.is_active = False
+    # User remains active in apartment, but pauses duty rotation (assigned_day = None)
     user.assigned_day = None
     session.add(user)
     await session.commit()
@@ -235,14 +235,15 @@ async def get_duty_for_date(
         return user_by_day, None
 
     # 3. Fallback to rotation state
+    duty_pool = [u for u in active_users if u.assigned_day is not None] or active_users
     rot_state = await get_or_create_rotation_state(session)
     slot_index = calculate_rotation_index(
         target_date=target_date,
-        total_users=len(active_users),
+        total_users=len(duty_pool),
         anchor_date=rot_state.anchor_date,
         anchor_slot=rot_state.anchor_slot,
     )
-    assigned_user = active_users[slot_index]
+    assigned_user = duty_pool[slot_index]
     return assigned_user, None
 
 

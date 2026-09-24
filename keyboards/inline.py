@@ -196,10 +196,10 @@ def get_swap_request_keyboard(
 
 
 def get_leave_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Confirmation buttons for /leave command."""
+    """Confirmation buttons for /leave command (navbatchilikdan chiqish)."""
     keyboard = [
         [
-            InlineKeyboardButton(text="Ha, chiqaman", callback_data="confirm_leave"),
+            InlineKeyboardButton(text="Ha, navbatchilikdan chiqaman", callback_data="confirm_leave"),
             InlineKeyboardButton(text="Bekor qilish", callback_data="cancel_leave"),
         ]
     ]

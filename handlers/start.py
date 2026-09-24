@@ -55,6 +55,18 @@ async def handle_start(message: Message, state: FSMContext):
         user = result.scalar_one_or_none()
 
         if user and user.is_active:
+            if user.assigned_day is None:
+                occupied_map = await get_occupied_slots_map(session)
+                await state.set_state(RegistrationState.waiting_for_slot)
+                await message.answer(
+                    f"👋 Assalomu alaykum, <b>{user.full_name}</b>!\n"
+                    f"🏠 Kvartira: <b>{settings.APARTMENT_NAME}</b> (🏢 {user.room_number}-Xona)\n\n"
+                    f"Siz hozirda faol navbatchilik ro'yxatida emassiz.\n"
+                    f"📅 <b>Qaytadan navbatchilikka qo'shilish uchun bo'sh kunlardan birini tanlang:</b>",
+                    reply_markup=get_day_slots_keyboard(occupied_map),
+                )
+                return
+
             today = date.today()
             duty_user, _ = await get_duty_for_date(session, today)
             duty_info = (
@@ -232,40 +244,49 @@ async def handle_change_day_slot(message: Message, state: FSMContext):
 
 @router.message(Command("leave"))
 async def handle_leave_command(message: Message):
-    """Prompt user to confirm leaving the apartment with inline buttons."""
+    """Prompt user to confirm pausing/leaving the duty rotation."""
     user_id = message.from_user.id
     async with get_session() as session:
         result = await session.execute(select(User).where(User.id == user_id, User.is_active.is_(True)))
         user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer("Siz hozirda faol xonadoshlar ro'yxatida emassiz.")
+        await message.answer("Siz hozirda faol xonadoshlar ro'yxatida emassiz. /start orqali ro'yxatdan o'ting.")
         return
 
+    if user.assigned_day is None:
+        await message.answer(
+            "Siz allaqachon navbatchilik ro'yxatidan chiqqansiz.\n"
+            "Qaytadan navbatchilikka qo'shilish uchun /kun yoki /start buyrug'ini bosing."
+        )
+        return
+
+    day_name = SLOT_NAMES.get(user.assigned_day, "Navbatchilik kuni")
+
     await message.answer(
-        f"⚠️ <b>Diqqat, {user.full_name}!</b>\n\n"
-        f"Rostdan ham kvartira safidan chiqmoqchimisiz?\n\n"
-        f"Chiqib ketsangiz, sizning navbatchilik kuningiz bo'shatiladi "
-        f"va boshqa a'zolar uchun ochiladi.",
+        f"⚠️ <b>Navbatchilikdan chiqish (vaqtincha dam olish / safar):</b>\n\n"
+        f"Hurmatli <b>{user.full_name}</b>!\n"
+        f"Haqiqatan ham navbatchilik ro'yxatidan chiqmoqchimisiz?\n\n"
+        f"Sizning <b>{day_name}</b> navbatchilik kuningiz bo'shaydi va qolgan xonadoshlar o'rtasida navbat qayta muvozanatlanadi.\n"
+        f"<i>(Kvartiradagi umumiy hisobingiz va xonangiz saqlanib qoladi)</i>",
         reply_markup=get_leave_confirm_keyboard(),
     )
 
 
 @router.callback_query(F.data == "confirm_leave")
 async def process_confirm_leave(callback: CallbackQuery):
-    """Deactivate user, free their slot, and announce to group."""
+    """Pause user's duty, free their slot, and announce to group."""
     user_id = callback.from_user.id
     async with get_session() as session:
         user_res = await session.execute(select(User).where(User.id == user_id))
         user = user_res.scalar_one_or_none()
-        day_name = SLOT_NAMES.get(user.assigned_day, "Navbat") if user else "Navbat"
+        day_name = SLOT_NAMES.get(user.assigned_day, "Navbatchilik") if user and user.assigned_day is not None else "Navbatchilik"
         success = await leave_and_rebalance(session, user_id)
-        active_users = await get_active_users(session)
 
     await callback.message.edit_text(
-        f"✅ <b>Siz kvartira a'zoligidan chiqarildingiz.</b>\n\n"
+        f"✅ <b>Siz navbatchilik ro'yxatidan chiqdingiz.</b>\n\n"
         f"Sizning <b>{day_name}</b> kuningiz bo'shatildi.\n"
-        f"Kelgusida qaytmoqchi bo'lsangiz, /start orqali qayta qo'shilishingiz mumkin."
+        f"Qaytadan navbatchilikka qo'shilish uchun istalgan vaqtda <b>/start</b> yoki <b>/kun</b> buyrug'ini bosing va bo'sh kunni tanlang."
     )
 
     if settings.GROUP_CHAT_ID and user:
@@ -273,8 +294,8 @@ async def process_confirm_leave(callback: CallbackQuery):
             await callback.bot.send_message(
                 chat_id=settings.GROUP_CHAT_ID,
                 text=(
-                    f"📢 <b>Kvartira tarkibi yangilandi!</b>\n\n"
-                    f"<b>{user.full_name}</b> kvartirani tark etdi.\n"
+                    f"📢 <b>Navbatchilik tarkibi yangilandi!</b>\n\n"
+                    f"<b>{user.full_name}</b> ({user.room_number}-Xona) navbatchilikdan vaqtincha chiqdi.\n"
                     f"Uning <b>{day_name}</b> navbatchilik kuni bo'shadi!"
                 ),
             )
@@ -285,7 +306,7 @@ async def process_confirm_leave(callback: CallbackQuery):
 @router.callback_query(F.data == "cancel_leave")
 async def process_cancel_leave(callback: CallbackQuery):
     """Cancel leave request."""
-    await callback.message.edit_text("Amal bekor qilindi. Siz kvartiramiz safidasiz! 🤝")
+    await callback.message.edit_text("Amal bekor qilindi. Siz navbatchilik safidasiz! 🤝")
 
 
 @router.message(F.text == "👥 Kvartirantlar")
@@ -316,6 +337,13 @@ async def handle_members(message: Message):
         else:
             text_lines.append(f"📅 <b>{day_title}:</b> <i>🟢 Bo'sh (hali tanlanmagan)</i>")
 
+    # Show any resting/paused roommates
+    unassigned = [u for u in active_users if u.assigned_day is None]
+    if unassigned:
+        text_lines.append("\n⏸ <b>Navbatchilikdan vaqtincha chiqqanlar:</b>")
+        for u in unassigned:
+            text_lines.append(f"• {u.full_name} ({u.room_number}-Xona)")
+
     text_lines.append("\n<i>O'z kuningizni tanlash yoki o'zgartirish uchun: /kun buyrug'idan foydalaning.</i>")
     await message.answer("\n".join(text_lines))
 
@@ -344,7 +372,11 @@ async def handle_profile(message: Message):
         else "✅ Jarimalar mavjud emas"
     )
 
-    day_str = SLOT_NAMES.get(user.assigned_day, "Tanlanmagan (/kun orqali tanlang)")
+    day_str = (
+        SLOT_NAMES.get(user.assigned_day)
+        if user.assigned_day is not None
+        else "⏸ Vaqtincha to'xtatilgan (/kun orqali qo'shiling)"
+    )
 
     await message.answer(
         f"👤 <b>Kvartirant Profili:</b>\n\n"
@@ -355,5 +387,5 @@ async def handle_profile(message: Message):
         f"Holat: <b>Faol xonadosh</b>\n\n"
         f"💰 <b>Jarima jamg'armasi holati:</b>\n"
         f"{debt_info}\n\n"
-        f"<i>Kuningizni o'zgartirish: /kun | Chiqish: /leave</i>"
+        f"<i>Navbatchilik kunini tanlash: /kun | Navbatchilikdan chiqish: /leave</i>"
     )

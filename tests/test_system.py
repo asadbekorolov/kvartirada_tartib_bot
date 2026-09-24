@@ -265,9 +265,28 @@ async def run_tests():
         assert fraud_fine_q.scalar_one_or_none() is None
         print(" [PASS] 13. Anti-Fraud Jazolash va Kechirish (FORGIVEN) ovoz berishi muvaffaqiyatli tekshirildi.")
 
+        # 14. Test Navbatchilikdan vaqtincha chiqish (Duty Pause/Leave) va qayta qo'shilish
+        paused = await leave_and_rebalance(session, 101)
+        assert paused is True
+        u101_res = await session.execute(select(User).where(User.id == 101))
+        u101 = u101_res.scalar_one()
+        assert u101.is_active is True  # Akkaunt o'chirilmagan
+        assert u101.assigned_day is None  # Navbatchilikdan chiqqan
+        assert u101.room_number == 1  # Xonasi saqlangan
+
+        # Slot 0 endi bo'sh
+        occ_map_after = await get_occupied_slots_map(session)
+        assert 0 not in occ_map_after
+
+        # Qaytadan slot 0 ga birikish
+        rejoin_ok, _ = await assign_user_slot(session, user_id=101, day_index=0)
+        assert rejoin_ok is True
+        assert u101.assigned_day == 0
+        print(" [PASS] 14. Navbatchilikdan vaqtincha chiqish (/leave) va qayta qo'shilish muvaffaqiyatli tekshirildi.")
+
     await engine.dispose()
     print("=" * 70)
-    print("BARCHA 13 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
+    print("BARCHA 14 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
     print("=" * 70)
 
 

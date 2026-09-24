@@ -48,7 +48,8 @@ async def set_default_bot_commands(bot: Bot) -> None:
         BotCommand(command="almashtirish", description="Navbatchilikni almashtirish"),
         BotCommand(command="azolar", description="Xonadoshlar ro'yxati va slotlar"),
         BotCommand(command="profil", description="Shaxsiy slot va hisob"),
-        BotCommand(command="leave", description="Kvartiradan chiqish"),
+        BotCommand(command="kun", description="Navbatchilik kunini tanlash / o'zgartirish"),
+        BotCommand(command="leave", description="Navbatchilikdan chiqish (dam olish / safar)"),
     ]
     try:
         await bot.set_my_commands(commands)
