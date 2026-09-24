@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -77,11 +78,43 @@ async def handle_start(message: Message, state: FSMContext):
 @router.message(RegistrationState.waiting_for_name)
 async def process_name(message: Message, state: FSMContext):
     """Step 1: Save full name and prompt for room selection via inline buttons."""
-    name = message.text.strip()
-    if len(name) < 2 or len(name) > 100:
-        await message.answer("⚠️ Iltimos, haqiqiy ism va familiyangizni to'g'ri kiriting:")
+    if not message.text:
+        await message.answer("⚠️ Iltimos, ism-familiyangizni matn ko'rinishida yozing:")
         return
 
+    text = message.text.strip()
+
+    # 1. Buyruqlarni filtrlash
+    if text.startswith("/"):
+        if text.startswith("/start"):
+            await state.clear()
+            await handle_start(message, state)
+            return
+        if text.startswith("/cancel"):
+            await state.clear()
+            await message.answer("Ro'yxatdan o'tish bekor qilindi. Qaytadan boshlash uchun /start bosing.")
+            return
+
+        await message.answer(
+            "⚠️ Iltimos, buyruq emas, haqiqiy ism-familiyangizni matn ko'rinishida yozing (Masalan: Jaloliddin):"
+        )
+        return
+
+    # 2. Ism validatsiyasi (harflar, bo'shliq, apostrof, chiziqcha)
+    letters = re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ]", text)
+    if len(letters) < 2 or len(text) > 100:
+        await message.answer(
+            "⚠️ Iltimos, haqiqiy ism-familiyangizni to'g'ri kiriting (Kamida 2 ta harf, masalan: Jaloliddin):"
+        )
+        return
+
+    if not re.match(r"^[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ`\-\s]+$", text):
+        await message.answer(
+            "⚠️ Iltimos, faqat harflardan iborat haqiqiy ism-familiyangizni yozing (Masalan: Jaloliddin):"
+        )
+        return
+
+    name = text
     await state.update_data(full_name=name)
     await state.set_state(RegistrationState.waiting_for_room)
     await message.answer(
@@ -96,7 +129,7 @@ async def process_room(callback: CallbackQuery, state: FSMContext):
     """Step 2: Save room, register in DB, and prompt for day slot selection."""
     room_number = int(callback.data.split(":")[1])
     data = await state.get_data()
-    full_name = data.get("full_name")
+    full_name = data.get("full_name") or callback.from_user.full_name
     username = callback.from_user.username
 
     async with get_session() as session:
@@ -110,12 +143,18 @@ async def process_room(callback: CallbackQuery, state: FSMContext):
         occupied_map = await get_occupied_slots_map(session)
 
     await state.set_state(RegistrationState.waiting_for_slot)
-    await callback.message.delete()
 
-    await callback.message.answer(
-        "🗓 <b>O'zingizga qulay bo'lgan haftalik navbatchilik kuningizni tanlang:</b>",
-        reply_markup=get_day_slots_keyboard(occupied_map),
+    prompt_text = (
+        f"Xonangiz: <b>{room_number}-Xona</b> deb saqlandi.\n\n"
+        f"🗓 <b>O'zingizga qulay bo'lgan haftalik navbatchilik kuningizni tanlang:</b>"
     )
+    keyboard = get_day_slots_keyboard(occupied_map)
+
+    try:
+        await callback.message.edit_text(prompt_text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(prompt_text, reply_markup=keyboard)
+    await callback.answer()
 
 
 @router.callback_query(RegistrationState.waiting_for_slot, F.data.startswith("slot_occ:"))
