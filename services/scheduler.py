@@ -26,6 +26,7 @@ from services.duty_service import (
     get_duty_votes_count,
     get_laundry_duty_for_date,
     get_or_create_daily_tasks,
+    get_water_duty_schedule,
     get_weekend_grocery_duty,
 )
 
@@ -42,19 +43,25 @@ async def send_morning_reminder(bot: Bot) -> None:
         user, record = await get_duty_for_date(session, today)
         laundry_user = await get_laundry_duty_for_date(session, today)
         tasks = await get_or_create_daily_tasks(session, today)
+        water_sched = await get_water_duty_schedule(session)
 
         if not user:
             logger.info("Morning reminder: Faol a'zolar topilmadi.")
             return
 
-        user_mention = f"<a href='tg://user?id={user.id}'>{user.full_name}</a>" if user.id else user.full_name
+        tg_id = user.telegram_id
+        user_mention = f"<a href='tg://user?id={tg_id}'>{user.full_name}</a>" if tg_id else f"<b>{user.full_name}</b>"
         laundry_mention = f"<b>{laundry_user.full_name}</b> ({laundry_user.room_number}-Xona)" if laundry_user else "Belgilanmagan"
+        water_room = water_sched.get("current_room", 1)
+        water_user = water_sched.get("current_user")
+        water_user_str = f" ({water_user.full_name})" if water_user else ""
 
         msg = (
             f"☀️ <b>Xayrli tong, xonadoshlar! (08:00 — Tonggi Start)</b>\n\n"
             f"📅 Bugungi sana: <b>{today.strftime('%d.%m.%Y')}</b>\n"
             f"🧹 <b>Bugungi kunlik navbatchi:</b> {user_mention} ({user.room_number}-Xona)\n"
-            f"🧺 <b>Bugungi kir yuvish navbati:</b> {laundry_mention}\n\n"
+            f"🧺 <b>Bugungi kir yuvish navbati:</b> {laundry_mention}\n"
+            f"💧 <b>Ichimlik suvi (10L) navbati:</b> 🏢 <b>{water_room}-Xona</b>{water_user_str}\n\n"
             f"<b>Navbatchining 5 ta asosiy vazifasi:</b>\n"
             f"1️⃣ 🍲 <b>Ovqat:</b> Kechki taomni tayyorlash yoki umumiy ovqatga qarash\n"
             f"2️⃣ 🍞 <b>Non va dasturxon:</b> Dasturxon atrofini toza saqlash, nonni nazorat qilish\n"
@@ -73,11 +80,12 @@ async def send_morning_reminder(bot: Bot) -> None:
             except Exception as e:
                 logger.error(f"Error sending morning reminder to group {group_id}: {e}")
 
-        # Send direct DM to duty user
-        try:
-            await bot.send_message(chat_id=user.id, text=msg, reply_markup=keyboard)
-        except Exception as e:
-            logger.warning(f"Could not send direct message to user {user.id}: {e}")
+        # Send direct DM to duty user if Telegram account is linked
+        if tg_id:
+            try:
+                await bot.send_message(chat_id=tg_id, text=msg, reply_markup=keyboard)
+            except Exception as e:
+                logger.warning(f"Could not send direct message to user {tg_id}: {e}")
 
 
 async def send_evening_reminder(bot: Bot) -> None:
@@ -114,10 +122,12 @@ async def send_evening_reminder(bot: Bot) -> None:
             except Exception as e:
                 logger.error(f"Error sending evening reminder to group {group_id}: {e}")
 
-        try:
-            await bot.send_message(chat_id=user.id, text=msg)
-        except Exception as e:
-            logger.warning(f"Could not send evening reminder to user {user.id}: {e}")
+        tg_id = user.telegram_id
+        if tg_id:
+            try:
+                await bot.send_message(chat_id=tg_id, text=msg)
+            except Exception as e:
+                logger.warning(f"Could not send evening reminder to user {tg_id}: {e}")
 
 
 async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
@@ -175,30 +185,34 @@ async def send_night_quiet_mode_and_summary(bot: Bot) -> None:
             except Exception as e:
                 logger.error(f"Error sending night quiet mode to group {group_id}: {e}")
 
-        try:
-            await bot.send_message(chat_id=today_user.id, text=msg)
-        except Exception as e:
-            logger.warning(f"Could not send night summary to user {today_user.id}: {e}")
+        today_tg_id = today_user.telegram_id
+        tomorrow_tg_id = tomorrow_user.telegram_id if tomorrow_user else None
 
-        if not all_done:
+        if today_tg_id:
             try:
-                reminder_dm = (
-                    f"🌙 <b>Eslatma, {today_user.full_name}:</b>\n\n"
-                    f"Bugungi navbatchilik vazifalarini to'liq yakunlashga ulgurmagan bo'lsangiz, "
-                    f"<b>ertaga soat 10:00 gacha</b> vaqtingiz bor.\n"
-                    f"Ertaga soat 10:00 da yakunlanmagan vazifalar xonadoshlar ovoziga qo'yiladi."
-                )
-                await bot.send_message(chat_id=today_user.id, text=reminder_dm)
+                await bot.send_message(chat_id=today_tg_id, text=msg)
             except Exception as e:
-                logger.warning(f"Could not send grace period reminder to {today_user.id}: {e}")
+                logger.warning(f"Could not send night summary to user {today_tg_id}: {e}")
 
-        if tomorrow_user and tomorrow_user.id != today_user.id:
+            if not all_done:
+                try:
+                    reminder_dm = (
+                        f"🌙 <b>Eslatma, {today_user.full_name}:</b>\n\n"
+                        f"Bugungi navbatchilik vazifalarini to'liq yakunlashga ulgurmagan bo'lsangiz, "
+                        f"<b>ertaga soat 10:00 gacha</b> vaqtingiz bor.\n"
+                        f"Ertaga soat 10:00 da yakunlanmagan vazifalar xonadoshlar ovoziga qo'yiladi."
+                    )
+                    await bot.send_message(chat_id=today_tg_id, text=reminder_dm)
+                except Exception as e:
+                    logger.warning(f"Could not send grace period reminder to {today_tg_id}: {e}")
+
+        if tomorrow_tg_id and tomorrow_tg_id != today_tg_id:
             try:
                 t_msg = (
                     f"🔔 <b>Eslatma:</b> Ertaga (<b>{tomorrow.strftime('%d.%m.%Y')}</b>) navbatchilik sizda!\n"
                     f"5 ta asosiy vazifani bajarishga tayyor turing."
                 )
-                await bot.send_message(chat_id=tomorrow_user.id, text=t_msg)
+                await bot.send_message(chat_id=tomorrow_tg_id, text=t_msg)
             except Exception as e:
                 logger.warning(f"Could not notify tomorrow user: {e}")
 

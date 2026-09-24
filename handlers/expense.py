@@ -95,6 +95,17 @@ async def handle_bozorlik_command(message: Message):
     # Reply to user or to photo
     await message.reply(report_text, reply_markup=keyboard)
 
+    # Broadcast to apartment group if recorded in private chat
+    if settings.GROUP_CHAT_ID and message.chat.id != settings.GROUP_CHAT_ID:
+        try:
+            await message.bot.send_message(
+                chat_id=settings.GROUP_CHAT_ID,
+                text=f"🛒 <b>Yangi bozorlik xarajati kiritildi!</b>\n\n{report_text}",
+                reply_markup=keyboard,
+            )
+        except Exception:
+            pass
+
 
 @router.callback_query(F.data.startswith("pay_exp:"))
 async def process_pay_expense(callback: CallbackQuery):

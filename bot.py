@@ -8,7 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from config import settings
-from database.session import init_db
+from database.session import get_session, init_db
 from handlers import (
     cleaning_router,
     duty_router,
@@ -20,6 +20,8 @@ from handlers import (
     swap_router,
     group_router,
 )
+from handlers.group import GroupAutoRegisterMiddleware
+from services.duty_service import get_active_group_chat_id
 from services.scheduler import setup_scheduler
 
 # Configure logging
@@ -65,11 +67,20 @@ async def main() -> None:
     await init_db()
     logger.info("Database initialized successfully.")
 
+    # Load active group chat id from DB if previously registered
+    async with get_session() as session:
+        active_group_id = await get_active_group_chat_id(session)
+        if active_group_id:
+            logger.info(f"Active group chat ID loaded: {active_group_id}")
+
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher(storage=MemoryStorage())
+
+    # Register auto-registration middleware for groups
+    dp.message.outer_middleware(GroupAutoRegisterMiddleware())
 
     # Include all handler routers
     dp.include_router(start_router)
@@ -94,6 +105,10 @@ async def main() -> None:
         # Delete webhook to prevent conflicts with polling
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot polling stopped by user signal.")
+    except Exception as e:
+        logger.error(f"Polling loop terminated with error: {e}", exc_info=True)
     finally:
         logger.info("Shutting down bot and scheduler...")
         scheduler.shutdown(wait=False)
