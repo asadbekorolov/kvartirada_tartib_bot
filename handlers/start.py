@@ -40,7 +40,7 @@ APARTMENT_RULES_SUMMARY = (
     "2️⃣ <b>Kechki Sukunat Rejimi:</b> Soat <b>22:30</b> dan boshlab xonalarda shovqin qilmaslik, "
     "qo'ng'iroqlarni balkonda amalga oshirish, video/musiqani faqat quloqchinda ko'rish shart.\n"
     "3️⃣ <b>Kir Yuvish Tartibi:</b> Har kuni belgilangan navbatdagi xonadosh kir mashinasidan foydalanadi.\n"
-    "4️⃣ <b>Suv Navbati:</b> 1-xona va 2-xona navbatma-navbat 19L toza ichimlik suvi olib keladi.\n"
+    "4️⃣ <b>Suv Navbati:</b> 1-xona va 2-xona navbatma-navbat 10L toza ichimlik suvi olib keladi.\n"
     "5️⃣ <b>Bozorlik va Tozalash:</b> Shanba kuni bozorlik juftligi xarid qiladi va 11 bandlik tozalash checklisti bajariladi."
 )
 

@@ -500,19 +500,22 @@ async def get_water_duty_schedule(session: AsyncSession) -> Dict:
 
 
 async def complete_water_duty(session: AsyncSession, user_id: int) -> User:
-    """Record that 19L drinking water bottle was brought by user."""
+    """Record that 10L drinking water was brought by user."""
     today = date.today()
+    user_res = await session.execute(
+        select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+    )
+    user = user_res.scalar_one()
+
     record = DutyHistory(
-        user_id=user_id,
+        user_id=user.id,
         duty_type=DutyType.WATER,
         duty_date=today,
         status=DutyStatus.COMPLETED,
     )
     session.add(record)
     await session.commit()
-
-    result = await session.execute(select(User).where(User.id == user_id))
-    return result.scalar_one()
+    return user
 
 
 async def mark_daily_duty_completed(

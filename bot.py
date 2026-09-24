@@ -42,7 +42,7 @@ async def set_default_bot_commands(bot: Bot) -> None:
         BotCommand(command="tozalash", description="11 bandlik tozalash checklisti"),
         BotCommand(command="bozorlik", description="Bozorlik hisob-kitobi (Split-Bill)"),
         BotCommand(command="mehmon", description="Mehmon kelishini e'lon qilish"),
-        BotCommand(command="suv", description="19L ichimlik suvi navbati"),
+        BotCommand(command="suv", description="10L ichimlik suvi navbati"),
         BotCommand(command="fond", description="Jarima jamg'armasi va balansi"),
         BotCommand(command="qoidalar", description="Kvartiraning 6 ta asosiy qoidasi"),
         BotCommand(command="almashtirish", description="Navbatchilikni almashtirish"),

@@ -2,7 +2,7 @@
 
 ## 1, 2 va 3-Bosqich: To'liq Arxitektura, Bozorlik (Split-Bill), Mehmon, Fond va Production/Deploy
 
-Kvartiradagi kunlik navbatchilik, kir yuvish, dam olish kunlari bozorlik xarajatlarini teng taqsimlash (Split-Bill), 11 bandlik tozalash, 19L ichimlik suvi ta'minoti, mehmon ogohlantirishlari, jarima fondi va kvartira qoidalarini avtomatlashtiruvchi to'liq Telegram bot.
+Kvartiradagi kunlik navbatchilik, kir yuvish, dam olish kunlari bozorlik xarajatlarini teng taqsimlash (Split-Bill), 11 bandlik tozalash, 10L ichimlik suvi ta'minoti, mehmon ogohlantirishlari, jarima fondi va kvartira qoidalarini avtomatlashtiruvchi to'liq Telegram bot.
 
 ---
 

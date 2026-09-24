@@ -242,7 +242,7 @@ def get_water_complete_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                text="💧 Suv olib kelindi (19L)",
+                text="💧 Suv olib kelindi (10L)",
                 callback_data="water_complete",
             )
         ]

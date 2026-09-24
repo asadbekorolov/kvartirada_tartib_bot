@@ -442,7 +442,7 @@ async def handle_water_duty(message: Message):
     )
 
     text = (
-        f"💧 <b>19L Toza Ichimlik Suvi Navbati Tizimi</b>\n\n"
+        f"💧 <b>10L Toza Ichimlik Suvi Navbati Tizimi</b>\n\n"
         f"Navbat 1-xona va 2-xona o'rtasida haftama-hafta almashib boradi.\n\n"
         f"📍 <b>HOZIRGI NAVBATDAGI XONA:</b> 🏢 <b>{cur_room}-XONA</b>\n"
         f"👤 <b>Xona ichidagi mas'ul xonadosh:</b> {cur_user_str}\n\n"
@@ -455,8 +455,8 @@ async def handle_water_duty(message: Message):
         f"   • Navbat: 🏢 <b>{next_room}-Xona</b>\n"
         f"   • Mas'ul: {next_user_str}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Jami keltirilgan suv ballonlari: {data['total_deliveries']} ta</i>\n\n"
-        f"Yangi suv balloni keltirilganda yoki buyurtma qilinganda, quyidagi tugmani bosing:"
+        f"<i>Jami keltirilgan suv: {data['total_deliveries']} marta</i>\n\n"
+        f"Yangi suv keltirilganda yoki buyurtma qilinganda, quyidagi tugmani bosing:"
     )
 
     await message.answer(text, reply_markup=get_water_complete_keyboard())
@@ -477,7 +477,7 @@ async def process_water_complete(callback: CallbackQuery):
     n_user_str = f"<b>{n_user.full_name}</b> (🏢 {n_user.room_number}-Xona)" if n_user else f"🏢 {n_room}-Xona"
 
     msg_text = (
-        f"💧 <b>Yangi 19L suv keltirilgani qayd etildi!</b>\n\n"
+        f"💧 <b>Yangi 10L suv keltirilgani qayd etildi!</b>\n\n"
         f"Olib kelgan xonadosh: <b>{user.full_name}</b> (🏢 {user.room_number}-Xona)\n\n"
         f"👉 <b>Keyingi navbat:</b> 🏢 <b>{n_room}-XONA</b>\n"
         f"👤 Keyingi mas'ul: {n_user_str}\n\n"
@@ -492,7 +492,7 @@ async def process_water_complete(callback: CallbackQuery):
                 chat_id=settings.GROUP_CHAT_ID,
                 text=(
                     f"💧 <b>Suv ta'minoti yangilandi!</b>\n\n"
-                    f"<b>{user.full_name}</b> 19L toza suv keltirdi. Rahmat!\n"
+                    f"<b>{user.full_name}</b> 10L toza suv keltirdi. Rahmat!\n"
                     f"Keyingi navbat: 🏢 <b>{n_room}-Xona</b> ({n_user_str})."
                 ),
             )
