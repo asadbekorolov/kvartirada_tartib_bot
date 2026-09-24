@@ -48,42 +48,17 @@ APARTMENT_RULES_SUMMARY = (
 
 @router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext):
-    """Handle /start command. Register new user or display dashboard for active user."""
+    """Handle /start command. Register new user or display message for active user."""
     user_id = message.from_user.id
     async with get_session() as session:
         result = await session.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
 
         if user and user.is_active:
-            if user.assigned_day is None:
-                occupied_map = await get_occupied_slots_map(session)
-                await state.set_state(RegistrationState.waiting_for_slot)
-                await message.answer(
-                    f"👋 Assalomu alaykum, <b>{user.full_name}</b>!\n"
-                    f"🏠 Kvartira: <b>{settings.APARTMENT_NAME}</b> (🏢 {user.room_number}-Xona)\n\n"
-                    f"Siz hozirda faol navbatchilik ro'yxatida emassiz.\n"
-                    f"📅 <b>Qaytadan navbatchilikka qo'shilish uchun bo'sh kunlardan birini tanlang:</b>",
-                    reply_markup=get_day_slots_keyboard(occupied_map),
-                )
-                return
-
-            today = date.today()
-            duty_user, _ = await get_duty_for_date(session, today)
-            duty_info = (
-                f"🧹 Bugungi navbatchi: <b>{duty_user.full_name}</b> ({duty_user.room_number}-Xona)"
-                if duty_user
-                else "🧹 <i>Navbatchi topilmadi</i>"
-            )
-
-            day_text = SLOT_NAMES.get(user.assigned_day, "Belgilanmagan")
-
+            await state.clear()
             await message.answer(
-                f"👋 Assalomu alaykum, <b>{user.full_name}</b>!\n"
-                f"🏠 Kvartira: <b>{settings.APARTMENT_NAME}</b>\n"
-                f"🏢 Xonangiz: <b>{user.room_number}-Xona</b>\n"
-                f"📅 Belgilangan navbatchilik kuningiz: <b>{day_text}</b>\n\n"
-                f"{duty_info}\n\n"
-                f"Quyidagi menyu orqali kerakli bo'limni tanlang:",
+                f"Siz allaqachon ro'yxatdan o'tgansiz ({user.full_name}, {user.room_number}-Xona). "
+                f"Quyidagi menyudan foydalanishingiz yoki /kun buyrug'i orqali o'z kuningizni tanlashingiz mumkin.",
                 reply_markup=get_main_menu_keyboard(),
             )
             return
@@ -92,9 +67,10 @@ async def handle_start(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(RegistrationState.waiting_for_name)
     await message.answer(
-        f"Assalomu alaykum! 🏠 <b>{settings.APARTMENT_NAME}</b> tartib va navbatchilik botiga xush kelibsiz.\n\n"
-        f"Kvartiraning navbatchilik tizimiga qo'shilish uchun, iltimos, "
-        f"<b>To'liq ism-familiyangizni</b> kiriting (Masalan: <i>Ali Valiyev</i>):"
+        "Assalomu alaykum! 🏠 <b>Kvartira Tartib Boti</b>ga xush kelibsiz!\n"
+        "Ushbu bot orqali kvartiradagi kunlik navbatchilik, 5 talik vazifalar nazorati, kir yuvish grafigi, "
+        "2 haftalik suv navbati va dam olish kunlari katta tozalash ishlari avtomatlashtiriladi.\n\n"
+        "Iltimos, o'zingizni tanishtiring:"
     )
 
 
@@ -137,9 +113,7 @@ async def process_room(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
 
     await callback.message.answer(
-        f"Xonangiz: <b>{room_number}-Xona</b> deb saqlandi.\n\n"
-        f"📅 <b>Haftalik navbatchilik kuningizni tanlang:</b>\n"
-        f"<i>(Yashil 🟢 — bo'sh kunlar, Qulf 🔒 — boshqa xonadoshlar band qilgan kunlar)</i>",
+        "🗓 <b>O'zingizga qulay bo'lgan haftalik navbatchilik kuningizni tanlang:</b>",
         reply_markup=get_day_slots_keyboard(occupied_map),
     )
 

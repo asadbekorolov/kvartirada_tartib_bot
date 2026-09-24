@@ -8,10 +8,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from database.base import Base
 from database.models import DutyStatus, Expense, ExpenseShare, PenaltyFund, RotationState, User
-from database.session import engine, get_session, init_db
 from services.cleaning_service import (
     CLEANING_TASKS,
     get_or_create_week_checklist,
@@ -39,21 +42,49 @@ from services.expense_service import (
     mark_expense_share_paid,
 )
 
+# Dedicated isolated test database - DO NOT touch production kvartira.db
+TEST_DB_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "test_kvartira.db"))
+TEST_DATABASE_URL = f"sqlite+aiosqlite:///{TEST_DB_FILE}"
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    future=True,
+)
+
+test_session_factory = async_sessionmaker(
+    bind=test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+
+@asynccontextmanager
+async def get_test_session() -> AsyncGenerator[AsyncSession, None]:
+    async with test_session_factory() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
 
 async def run_tests():
     print("=" * 70)
     print("MISSION 3-BOSQICH: SPLIT-BILL, MEHMON, FOND VA DOKER TIZIMLARI TESTI")
+    print(f"Test bazasi: {TEST_DB_FILE}")
     print("=" * 70)
 
-    from database.base import Base
-
-    # 1. Reset DB tables cleanly
-    async with engine.begin() as conn:
+    # 1. Reset Test DB tables cleanly
+    async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
-    await init_db()
-    print(" [PASS] 1. Ma'lumotlar bazasi toza holatda yaratildi va barcha jadvallar faollashtirildi.")
+        await conn.run_sync(Base.metadata.create_all)
+    print(" [PASS] 1. Alohida test ma'lumotlar bazasi (test_kvartira.db) yaratildi va jadvallar tozalandi.")
 
-    async with get_session() as session:
+    async with get_test_session() as session:
         # 2. Add 8 initial apartment residents
         residents_data = [
             (101, "asadbek", "Asadbek Karimov", 1),
@@ -284,9 +315,17 @@ async def run_tests():
         assert u101.assigned_day == 0
         print(" [PASS] 14. Navbatchilikdan vaqtincha chiqish (/leave) va qayta qo'shilish muvaffaqiyatli tekshirildi.")
 
-    await engine.dispose()
+    await test_engine.dispose()
+    # Clean up isolated test database file
+    if os.path.exists(TEST_DB_FILE):
+        try:
+            os.remove(TEST_DB_FILE)
+        except Exception:
+            pass
+
     print("=" * 70)
     print("BARCHA 14 TA TIZIM TESTLARI MUVAFFAQIYATLI O'TDI! 🚀")
+    print(f"Test bazasi ({TEST_DB_FILE}) avtomatik o'chirildi. Asosiy kvartira.db daxlsiz qoldi.")
     print("=" * 70)
 
 

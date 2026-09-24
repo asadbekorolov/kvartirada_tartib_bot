@@ -13,7 +13,7 @@ SLOT_NAMES = {
     4: "Juma",
     5: "Shanba",
     6: "Yakshanba",
-    7: "Zaxira / Yordamchi slot",
+    7: "Zaxira slot",
 }
 
 DAILY_5_TASKS = {
