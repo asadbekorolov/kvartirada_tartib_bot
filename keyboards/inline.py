@@ -25,6 +25,37 @@ DAILY_5_TASKS = {
 }
 
 
+def format_claim_button_text(full_name: str, room_number: int) -> str:
+    """Format label: e.g. 'Avazbek' -> '👤 Men Avazbekman (Xona 1)'"""
+    if full_name.endswith("man"):
+        affix_name = full_name
+    elif full_name.endswith("bro"):
+        affix_name = f"{full_name}man"
+    else:
+        affix_name = f"{full_name}man"
+    return f"👤 Men {affix_name} (Xona {room_number})"
+
+
+def get_claim_profiles_keyboard(users: List[User]) -> InlineKeyboardMarkup:
+    """
+    8 ta xonadon a'zosi profilini egallash (Claim) uchun vertikal tugmalar:
+    Bo'sh bo'lsa: [ 👤 Men {Ism}man (Xona {Xona}) ]
+    Band bo'lsa:  [ 🔒 {Ism} (Band) ]
+    """
+    keyboard = []
+    sorted_users = sorted(users, key=lambda u: u.order_index)
+    for u in sorted_users:
+        if u.telegram_id is not None:
+            btn_text = f"🔒 {u.full_name} (Band)"
+            cb_data = f"profile_claimed:{u.id}"
+        else:
+            btn_text = format_claim_button_text(u.full_name, u.room_number)
+            cb_data = f"claim_profile:{u.id}"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=cb_data)])
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 def get_room_selection_keyboard() -> InlineKeyboardMarkup:
     """Inline keyboard for selecting room number during registration."""
     keyboard = [

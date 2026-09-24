@@ -1,5 +1,6 @@
 import re
 from datetime import date
+from typing import Optional
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -12,9 +13,9 @@ from database.models import PenaltyFund, User
 from database.session import get_session
 from keyboards.inline import (
     SLOT_NAMES,
+    get_claim_profiles_keyboard,
     get_day_slots_keyboard,
     get_leave_confirm_keyboard,
-    get_room_selection_keyboard,
 )
 from keyboards.reply import get_main_menu_keyboard
 from services.duty_service import (
@@ -23,15 +24,12 @@ from services.duty_service import (
     get_duty_for_date,
     get_occupied_slots_map,
     leave_and_rebalance,
-    register_or_join,
 )
 
 router = Router(name="start_router")
 
 
 class RegistrationState(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_room = State()
     waiting_for_slot = State()
 
 
@@ -49,112 +47,156 @@ APARTMENT_RULES_SUMMARY = (
 
 @router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext):
-    """Handle /start command. Register new user or display message for active user."""
+    """
+    Handle /start command.
+    1. Agar foydalanuvchi allaqachon biriktirilgan bo'lsa:
+       To'g'ridan-to'g'ri salomlashib, menyuni ochib berish.
+    2. Agar hali bog'lanmagan bo'lsa:
+       8 ta xonadosh profil tugmalarini vertikal chiqarish (1-Click Claim).
+    """
+    await state.clear()
     user_id = message.from_user.id
-    async with get_session() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
 
-        if user and user.is_active:
-            await state.clear()
+    async with get_session() as session:
+        # Check if this Telegram account is already claimed
+        res = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+        )
+        user = res.scalar_one_or_none()
+
+        if user and user.telegram_id == user_id and user.is_active:
             await message.answer(
-                f"Siz allaqachon ro'yxatdan o'tgansiz ({user.full_name}, {user.room_number}-Xona). "
-                f"Quyidagi menyudan foydalanishingiz yoki /kun buyrug'i orqali o'z kuningizni tanlashingiz mumkin.",
+                f"Assalomu alaykum, <b>{user.full_name}</b>! Profilingiz faol ({user.room_number}-Xona). "
+                f"Menyudan foydalanishingiz mumkin.",
                 reply_markup=get_main_menu_keyboard(),
             )
             return
 
-    # Start registration process
-    await state.clear()
-    await state.set_state(RegistrationState.waiting_for_name)
+        # Fetch all 8 apartment profiles
+        profiles_res = await session.execute(select(User).order_by(User.order_index.asc()))
+        profiles = profiles_res.scalars().all()
+
+    first_name = message.from_user.first_name or "Xonadosh"
+
+    welcome_text = (
+        f"👋 Assalomu alaykum, {first_name}!\n\n"
+        f"🏢 <b>Kvartira Bot</b> tizimiga xush kelibsiz!\n"
+        f"Ushbu bot 8 kishilik xonadonimizdagi kunlik navbatchilik, kir yuvish, "
+        f"2 ta xona baki suvini keltirish, bozorlik va general uborqa jarayonlarini boshqaradi.\n\n"
+        f"⚠️ Sizning Telegram hisobingiz hali xonadondagi profilingizga bog'lanmagan. Iltimos, ismingizni tanlang:"
+    )
+
     await message.answer(
-        "Assalomu alaykum! 🏠 <b>Kvartira Tartib Boti</b>ga xush kelibsiz!\n"
-        "Ushbu bot orqali kvartiradagi kunlik navbatchilik, 5 talik vazifalar nazorati, kir yuvish grafigi, "
-        "2 haftalik suv navbati va dam olish kunlari katta tozalash ishlari avtomatlashtiriladi.\n\n"
-        "Iltimos, o'zingizni tanishtiring:"
+        welcome_text,
+        reply_markup=get_claim_profiles_keyboard(profiles),
     )
 
 
-@router.message(RegistrationState.waiting_for_name)
-async def process_name(message: Message, state: FSMContext):
-    """Step 1: Save full name and prompt for room selection via inline buttons."""
-    if not message.text:
-        await message.answer("⚠️ Iltimos, ism-familiyangizni matn ko'rinishida yozing:")
-        return
-
-    text = message.text.strip()
-
-    # 1. Buyruqlarni filtrlash
-    if text.startswith("/"):
-        if text.startswith("/start"):
-            await state.clear()
-            await handle_start(message, state)
-            return
-        if text.startswith("/cancel"):
-            await state.clear()
-            await message.answer("Ro'yxatdan o'tish bekor qilindi. Qaytadan boshlash uchun /start bosing.")
-            return
-
-        await message.answer(
-            "⚠️ Iltimos, buyruq emas, haqiqiy ism-familiyangizni matn ko'rinishida yozing (Masalan: Jaloliddin):"
-        )
-        return
-
-    # 2. Ism validatsiyasi (harflar, bo'shliq, apostrof, chiziqcha)
-    letters = re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ]", text)
-    if len(letters) < 2 or len(text) > 100:
-        await message.answer(
-            "⚠️ Iltimos, haqiqiy ism-familiyangizni to'g'ri kiriting (Kamida 2 ta harf, masalan: Jaloliddin):"
-        )
-        return
-
-    if not re.match(r"^[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ`\-\s]+$", text):
-        await message.answer(
-            "⚠️ Iltimos, faqat harflardan iborat haqiqiy ism-familiyangizni yozing (Masalan: Jaloliddin):"
-        )
-        return
-
-    name = text
-    await state.update_data(full_name=name)
-    await state.set_state(RegistrationState.waiting_for_room)
-    await message.answer(
-        f"Rahmat, <b>{name}</b>!\n\n"
-        f"Endi qaysi xonada istiqomat qilishingizni tanlang:",
-        reply_markup=get_room_selection_keyboard(),
-    )
+@router.callback_query(F.data.startswith("profile_claimed:"))
+async def handle_already_claimed_click(callback: CallbackQuery):
+    """Alert user that this profile is already taken by someone else."""
+    await callback.answer("⚠️ Bu profil allaqachon bog'langan!", show_alert=True)
 
 
-@router.callback_query(RegistrationState.waiting_for_room, F.data.startswith("room_select:"))
-async def process_room(callback: CallbackQuery, state: FSMContext):
-    """Step 2: Save room, register in DB, and prompt for day slot selection."""
-    room_number = int(callback.data.split(":")[1])
-    data = await state.get_data()
-    full_name = data.get("full_name") or callback.from_user.full_name
-    username = callback.from_user.username
+@router.callback_query(F.data.startswith("claim_profile:"))
+async def handle_claim_profile(callback: CallbackQuery, state: FSMContext):
+    """1-Click Claim: Bind Telegram account to chosen roommate profile."""
+    profile_id = int(callback.data.split(":")[1])
+    tg_user_id = callback.from_user.id
+    tg_username = callback.from_user.username
 
     async with get_session() as session:
-        user, is_created = await register_or_join(
-            session=session,
-            user_id=callback.from_user.id,
-            full_name=full_name,
-            room_number=room_number,
-            username=username,
+        # 1. Check if user already claimed another profile
+        existing_res = await session.execute(
+            select(User).where(User.telegram_id == tg_user_id)
         )
+        existing_user = existing_res.scalar_one_or_none()
+        if existing_user:
+            await callback.answer("⚠️ Siz allaqachon profilingizni bog'lagansiz!", show_alert=True)
+            return
+
+        # 2. Check target profile
+        target_res = await session.execute(select(User).where(User.id == profile_id))
+        target_user = target_res.scalar_one_or_none()
+        if not target_user:
+            await callback.answer("⚠️ Profil topilmadi!", show_alert=True)
+            return
+
+        # 3. Anti-Hijack: Check if someone else just claimed it
+        if target_user.telegram_id is not None:
+            await callback.answer("⚠️ Bu profil allaqachon bog'langan!", show_alert=True)
+            all_users = (await session.execute(select(User).order_by(User.order_index.asc()))).scalars().all()
+            try:
+                await callback.message.edit_reply_markup(reply_markup=get_claim_profiles_keyboard(all_users))
+            except Exception:
+                pass
+            return
+
+        # 4. Successfully claim and link Telegram details
+        target_user.telegram_id = tg_user_id
+        target_user.username = tg_username
+        target_user.is_active = True
+        session.add(target_user)
+        await session.commit()
+
+        claimed_name = target_user.full_name
+        claimed_room = target_user.room_number
+
+    await callback.answer("✅ Profil muvaffaqiyatli bog'landi!")
+
+    confirm_msg = (
+        f"✅ Profil muvaffaqiyatli bog'landi! Xush kelibsiz, <b>{claimed_name}</b> ({claimed_room}-Xona).\n\n"
+        f"{APARTMENT_RULES_SUMMARY}"
+    )
+
+    try:
+        await callback.message.edit_text(confirm_msg)
+    except Exception:
+        await callback.message.answer(confirm_msg)
+
+    await callback.message.answer(
+        "Quyidagi menyu orqali botdan foydalanishingiz mumkin:",
+        reply_markup=get_main_menu_keyboard(),
+    )
+
+    # Broadcast to apartment group if configured
+    if settings.GROUP_CHAT_ID:
+        try:
+            uname_part = f" (@{tg_username})" if tg_username else ""
+            await callback.bot.send_message(
+                chat_id=settings.GROUP_CHAT_ID,
+                text=(
+                    f"🎉 <b>Xonadosh botga ulandi!</b>\n\n"
+                    f"👤 <b>{claimed_name}</b>{uname_part}\n"
+                    f"🏢 Xona: <b>{claimed_room}-Xona</b>"
+                ),
+            )
+        except Exception:
+            pass
+
+
+@router.message(Command("kun"))
+async def handle_change_day_slot(message: Message, state: FSMContext):
+    """Allow active roommate to choose or change their duty day slot."""
+    user_id = message.from_user.id
+    async with get_session() as session:
+        user_res = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id), User.is_active.is_(True))
+        )
+        user = user_res.scalar_one_or_none()
+        if not user:
+            await message.answer("Siz faol xonadoshlar ro'yxatida emassiz. /start orqali profilingizni tanlang.")
+            return
+
         occupied_map = await get_occupied_slots_map(session)
 
     await state.set_state(RegistrationState.waiting_for_slot)
-
-    prompt_text = (
-        f"Xonangiz: <b>{room_number}-Xona</b> deb saqlandi.\n\n"
-        f"🗓 <b>O'zingizga qulay bo'lgan haftalik navbatchilik kuningizni tanlang:</b>"
+    await message.answer(
+        f"📅 <b>Haftalik navbatchilik kuningizni tanlang:</b>\n"
+        f"<i>Hozirgi kuningiz: {SLOT_NAMES.get(user.assigned_day, 'Belgilanmagan')}</i>\n\n"
+        f"(Yashil 🟢 — bo'sh kunlar, Qulf 🔒 — band kunlar)",
+        reply_markup=get_day_slots_keyboard(occupied_map),
     )
-    keyboard = get_day_slots_keyboard(occupied_map)
-
-    try:
-        await callback.message.edit_text(prompt_text, reply_markup=keyboard)
-    except Exception:
-        await callback.message.answer(prompt_text, reply_markup=keyboard)
-    await callback.answer()
 
 
 @router.callback_query(RegistrationState.waiting_for_slot, F.data.startswith("slot_occ:"))
@@ -184,7 +226,9 @@ async def process_slot_selection(callback: CallbackQuery, state: FSMContext):
 
     async with get_session() as session:
         success, occupied_name = await assign_user_slot(session, user_id, day_idx)
-        user_res = await session.execute(select(User).where(User.id == user_id))
+        user_res = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+        )
         user = user_res.scalar_one_or_none()
         occupied_map = await get_occupied_slots_map(session)
 
@@ -218,53 +262,19 @@ async def process_slot_selection(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.answer(confirm_msg, reply_markup=get_main_menu_keyboard())
 
-    # Broadcast notification to group chat
-    if settings.GROUP_CHAT_ID:
-        try:
-            await callback.bot.send_message(
-                chat_id=settings.GROUP_CHAT_ID,
-                text=(
-                    f"📢 <b>Yangi navbatchi biriktirildi!</b>\n\n"
-                    f"👤 <b>{user_name}</b> ({room_num}-Xona)\n"
-                    f"📅 Navbatchilik kuni: <b>{day_title}</b>"
-                ),
-            )
-        except Exception:
-            pass
-
-
-@router.message(Command("kun"))
-async def handle_change_day_slot(message: Message, state: FSMContext):
-    """Allow active roommate to choose or change their duty day slot."""
-    user_id = message.from_user.id
-    async with get_session() as session:
-        user_res = await session.execute(select(User).where(User.id == user_id, User.is_active.is_(True)))
-        user = user_res.scalar_one_or_none()
-        if not user:
-            await message.answer("Siz faol xonadoshlar ro'yxatida emassiz. /start orqali ro'yxatdan o'ting.")
-            return
-
-        occupied_map = await get_occupied_slots_map(session)
-
-    await state.set_state(RegistrationState.waiting_for_slot)
-    await message.answer(
-        f"📅 <b>Haftalik navbatchilik kuningizni tanlang:</b>\n"
-        f"<i>Hozirgi kuningiz: {SLOT_NAMES.get(user.assigned_day, 'Belgilanmagan')}</i>\n\n"
-        f"(Yashil 🟢 — bo'sh kunlar, Qulf 🔒 — band kunlar)",
-        reply_markup=get_day_slots_keyboard(occupied_map),
-    )
-
 
 @router.message(Command("leave"))
 async def handle_leave_command(message: Message):
     """Prompt user to confirm pausing/leaving the duty rotation."""
     user_id = message.from_user.id
     async with get_session() as session:
-        result = await session.execute(select(User).where(User.id == user_id, User.is_active.is_(True)))
+        result = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id), User.is_active.is_(True))
+        )
         user = result.scalar_one_or_none()
 
     if not user:
-        await message.answer("Siz hozirda faol xonadoshlar ro'yxatida emassiz. /start orqali ro'yxatdan o'ting.")
+        await message.answer("Siz hozirda faol xonadoshlar ro'yxatida emassiz. /start orqali profilingizni tanlang.")
         return
 
     if user.assigned_day is None:
@@ -281,7 +291,7 @@ async def handle_leave_command(message: Message):
         f"Hurmatli <b>{user.full_name}</b>!\n"
         f"Haqiqatan ham navbatchilik ro'yxatidan chiqmoqchimisiz?\n\n"
         f"Sizning <b>{day_name}</b> navbatchilik kuningiz bo'shaydi va qolgan xonadoshlar o'rtasida navbat qayta muvozanatlanadi.\n"
-        f"<i>(Kvartiradagi umumiy hisobingiz va xonangiz saqlanib qoladi)</i>",
+        f"<i>(Kvartiradagi profilingiz va xonangiz saqlanib qoladi)</i>",
         reply_markup=get_leave_confirm_keyboard(),
     )
 
@@ -291,10 +301,12 @@ async def process_confirm_leave(callback: CallbackQuery):
     """Pause user's duty, free their slot, and announce to group."""
     user_id = callback.from_user.id
     async with get_session() as session:
-        user_res = await session.execute(select(User).where(User.id == user_id))
+        user_res = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+        )
         user = user_res.scalar_one_or_none()
         day_name = SLOT_NAMES.get(user.assigned_day, "Navbatchilik") if user and user.assigned_day is not None else "Navbatchilik"
-        success = await leave_and_rebalance(session, user_id)
+        success = await leave_and_rebalance(session, user.id if user else user_id)
 
     await callback.message.edit_text(
         f"✅ <b>Siz navbatchilik ro'yxatidan chiqdingiz.</b>\n\n"
@@ -332,7 +344,7 @@ async def handle_members(message: Message):
         active_users = await get_active_users(session)
 
     if not active_users:
-        await message.answer("Hozircha kvartirada faol a'zolar yo'q. /start orqali qo'shiling.")
+        await message.answer("Hozircha kvartirada a'zolar yo'q. /start orqali profilingizni tanlang.")
         return
 
     text_lines = [
@@ -344,8 +356,9 @@ async def handle_members(message: Message):
         user = occupied_map.get(day_idx)
         if user:
             username_part = f" (@{user.username})" if user.username else ""
+            status_tag = "" if user.telegram_id else " <i>(⏳ Kutilmoqda)</i>"
             text_lines.append(
-                f"📅 <b>{day_title}:</b> <b>{user.full_name}</b>{username_part} — 🏢 <i>{user.room_number}-Xona</i>"
+                f"📅 <b>{day_title}:</b> <b>{user.full_name}</b>{username_part} — 🏢 <i>{user.room_number}-Xona</i>{status_tag}"
             )
         else:
             text_lines.append(f"📅 <b>{day_title}:</b> <i>🟢 Bo'sh (hali tanlanmagan)</i>")
@@ -357,7 +370,7 @@ async def handle_members(message: Message):
         for u in unassigned:
             text_lines.append(f"• {u.full_name} ({u.room_number}-Xona)")
 
-    text_lines.append("\n<i>O'z kuningizni tanlash yoki o'zgartirish uchun: /kun buyrug'idan foydalaning.</i>")
+    text_lines.append("\n<i>O'z profilingizni ko'rish: /profil | Navbatchilik kuni: /kun</i>")
     await message.answer("\n".join(text_lines))
 
 
@@ -367,14 +380,16 @@ async def handle_profile(message: Message):
     """Display user's apartment profile, room, slot, and penalty debts."""
     user_id = message.from_user.id
     async with get_session() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
+        result = await session.execute(
+            select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+        )
         user = result.scalar_one_or_none()
         if not user or not user.is_active:
-            await message.answer("Siz tizimda faol a'zo emassiz. /start orqali ro'yxatdan o'ting.")
+            await message.answer("Siz tizimda hali profilingizni tanlamagansiz. /start orqali tanlang.")
             return
 
         penalties_res = await session.execute(
-            select(PenaltyFund).where(PenaltyFund.user_id == user_id, PenaltyFund.is_paid.is_(False))
+            select(PenaltyFund).where(PenaltyFund.user_id == user.id, PenaltyFund.is_paid.is_(False))
         )
         unpaid_penalties = penalties_res.scalars().all()
         total_debt = sum(p.amount for p in unpaid_penalties)
@@ -391,11 +406,13 @@ async def handle_profile(message: Message):
         else "⏸ Vaqtincha to'xtatilgan (/kun orqali qo'shiling)"
     )
 
+    tg_display = f"<code>{user.telegram_id}</code>" if user.telegram_id else "<i>Bog'lanmagan</i>"
+
     await message.answer(
         f"👤 <b>Kvartirant Profili:</b>\n\n"
         f"Ism-familiya: <b>{user.full_name}</b>\n"
-        f"Telegram ID: <code>{user.id}</code>\n"
         f"Xona: <b>{user.room_number}-Xona</b>\n"
+        f"Telegram ID: {tg_display}\n"
         f"Navbatchilik kuni: <b>{day_str}</b>\n"
         f"Holat: <b>Faol xonadosh</b>\n\n"
         f"💰 <b>Jarima jamg'armasi holati:</b>\n"

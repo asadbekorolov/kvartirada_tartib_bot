@@ -47,23 +47,24 @@ async def assign_user_slot(
     Assign a chosen day slot (0..7) to user with concurrency check.
     Returns (True, None) on success, or (False, owner_name) if already occupied.
     """
+    user_res = await session.execute(
+        select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+    )
+    user = user_res.scalar_one_or_none()
+    if not user:
+        return False, None
+
     # Check if slot is already occupied by another active user
     result = await session.execute(
         select(User).where(
             User.is_active.is_(True),
             User.assigned_day == day_index,
-            User.id != user_id,
+            User.id != user.id,
         )
     )
     occupied_by = result.scalar_one_or_none()
     if occupied_by:
         return False, occupied_by.full_name
-
-    # Assign to current user
-    user_res = await session.execute(select(User).where(User.id == user_id))
-    user = user_res.scalar_one_or_none()
-    if not user:
-        return False, None
 
     user.assigned_day = day_index
     user.order_index = day_index
@@ -145,12 +146,15 @@ async def register_or_join(
     Add or reactivate user in the database without assigning slot yet.
     Slot selection happens in the next step via inline day buttons.
     """
-    result = await session.execute(select(User).where(User.id == user_id))
+    result = await session.execute(
+        select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+    )
     user = result.scalar_one_or_none()
 
     if user is None:
         user = User(
             id=user_id,
+            telegram_id=user_id,
             username=username,
             full_name=full_name,
             room_number=room_number,
@@ -176,7 +180,9 @@ add_or_update_user = register_or_join
 
 async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
     """Pause duty / leave duty rotation, clear their slot, and rebalance remaining members."""
-    result = await session.execute(select(User).where(User.id == user_id))
+    result = await session.execute(
+        select(User).where((User.telegram_id == user_id) | (User.id == user_id))
+    )
     user = result.scalar_one_or_none()
     if not user or not user.is_active:
         return False
@@ -189,7 +195,7 @@ async def leave_and_rebalance(session: AsyncSession, user_id: int) -> bool:
     session.add(user)
     await session.commit()
 
-    ref_user = duty_user_today if (duty_user_today and duty_user_today.id != user_id) else None
+    ref_user = duty_user_today if (duty_user_today and duty_user_today.id != user.id) else None
     await rebalance_users(session, reference_user_for_anchor=ref_user)
     return True
 

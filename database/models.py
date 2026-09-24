@@ -36,7 +36,8 @@ class DutyStatus(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False, doc="Telegram User ID")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, doc="Profile ID (1..8)")
+    telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, nullable=True, doc="Telegram User ID")
     username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     room_number: Mapped[int] = mapped_column(Integer, nullable=False, doc="Room number: 1 or 2")

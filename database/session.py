@@ -40,9 +40,13 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
         def migrate_schema(sync_conn):
-            # Check and add assigned_day if not present in users table
+            # Check and add assigned_day and telegram_id if not present in users table
             try:
                 sync_conn.exec_driver_sql("ALTER TABLE users ADD COLUMN assigned_day INTEGER")
+            except Exception:
+                pass
+            try:
+                sync_conn.exec_driver_sql("ALTER TABLE users ADD COLUMN telegram_id BIGINT")
             except Exception:
                 pass
 
